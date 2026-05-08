@@ -1,11 +1,16 @@
-name: Build Windows EXE
+name: Build Bench Manager EXE
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  # Ручной запуск из интерфейса GitHub
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия сборки'
+        required: false
+        default: '1.0.0'
 
 jobs:
   build:
@@ -28,11 +33,30 @@ jobs:
     
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name "BenchManager" main.py
+        pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "scripts;scripts" --add-data "config.yaml;." main.py
     
-    - name: Upload EXE
+    - name: Check EXE exists
+      run: |
+        if exist "dist\BenchManager.exe" (
+          echo EXE created successfully
+          dir dist\BenchManager.exe
+        ) else (
+          echo ERROR: EXE not found!
+          exit 1
+        )
+    
+    - name: Upload EXE artifact
       uses: actions/upload-artifact@v4
       with:
-        name: BenchManager-Windows
+        name: BenchManager-Windows-v${{ github.event.inputs.version || '1.0.0' }}
         path: dist/BenchManager.exe
         retention-days: 30
+    
+    - name: Create Release (if tag)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: dist/BenchManager.exe
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
