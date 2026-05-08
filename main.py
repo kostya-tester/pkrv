@@ -19,9 +19,17 @@ else:
     # Запуск из Python
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Добавляем корень проекта в путь
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+# Добавляем ВСЕ нужные папки в sys.path
+paths_to_add = [
+    BASE_DIR,
+    os.path.join(BASE_DIR, 'core'),
+    os.path.join(BASE_DIR, 'logger'),
+    os.path.join(BASE_DIR, 'gui'),
+]
+
+for path in paths_to_add:
+    if os.path.exists(path) and path not in sys.path:
+        sys.path.insert(0, path)
 
 # Путь к картинкам
 if getattr(sys, 'frozen', False):
@@ -41,13 +49,39 @@ else:
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QIcon
 
-from core.bench_connector import BenchConnector
-from core.file_transfer import FileTransfer
-from core.file_manager import FileManager
-from core.process_manager import ProcessManager
-from core.board_interface import BoardInterface
-from logger.log_manager import LogManager
-from gui.main_window import MainWindow
+# Импортируем модули ядра через importlib для надежности
+import importlib
+
+def safe_import(module_name: str):
+    """Безопасный импорт модуля с подробной ошибкой"""
+    try:
+        return importlib.import_module(module_name)
+    except ImportError as e:
+        print(f"ОШИБКА ИМПОРТА: {module_name}")
+        print(f"  Путь: {sys.path}")
+        print(f"  Ошибка: {e}")
+        raise
+
+bench_connector = safe_import('bench_connector')
+BenchConnector = bench_connector.BenchConnector
+
+file_transfer = safe_import('file_transfer')
+FileTransfer = file_transfer.FileTransfer
+
+file_manager = safe_import('file_manager')
+FileManager = file_manager.FileManager
+
+process_manager = safe_import('process_manager')
+ProcessManager = process_manager.ProcessManager
+
+board_interface = safe_import('board_interface')
+BoardInterface = board_interface.BoardInterface
+
+log_manager = safe_import('log_manager')
+LogManager = log_manager.LogManager
+
+gui_main = safe_import('main_window')
+MainWindow = gui_main.MainWindow
 
 
 # ============================================================
@@ -171,37 +205,19 @@ def run_console():
     print("\n" + "=" * 60)
     print("Интерактивная консоль")
     print("=" * 60)
-    print("\nДоступные объекты:")
-    print("  bc    - BenchConnector (подключение к стендам)")
-    print("  ft    - FileTransfer (загрузка/скачивание файлов)")
-    print("  fm    - FileManager (работа с папками)")
-    print("  pm    - ProcessManager (управление процессами)")
-    print("  bi    - BoardInterface (работа с платами)")
-    print("  logger - LogManager (логирование)")
-    print("\nПримеры команд:")
-    print("  bc.connect_to_stand('ГОЗ')")
-    print("  bc.get_cvs_checksums('ГОЗ')")
-    print("  bc.check_config_file('ГОЗ')")
-    print("  pm.get_process_list('ГОЗ')")
-    print("  bi.flash_firmware('ГОЗ', 'mpo')")
-    print("\nДля выхода введите: exit")
+    print("\nДоступные объекты: bc, ft, fm, pm, bi, logger")
+    print("Для выхода введите: exit")
     
-    # Инициализируем остальные модули
     ft = FileTransfer(bc)
     fm = FileManager(bc)
     pm = ProcessManager(bc)
     bi = BoardInterface(bc)
     
-    # Интерактивная сессия
     import code
     code.interact(
         local={
-            'bc': bc,
-            'ft': ft,
-            'fm': fm,
-            'pm': pm,
-            'bi': bi,
-            'logger': logger
+            'bc': bc, 'ft': ft, 'fm': fm,
+            'pm': pm, 'bi': bi, 'logger': logger
         },
         banner=""
     )
@@ -218,51 +234,25 @@ def run_console():
 def main():
     """Главная функция"""
     parser = argparse.ArgumentParser(
-        description="Bench Manager - управление стендами и платами",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Примеры:
-  python main.py              # Запуск GUI
-  python main.py --console    # Консольный режим
-  python main.py --check      # Проверить доступность стендов
-        """
+        description="Bench Manager - управление стендами и платами"
     )
     
-    parser.add_argument(
-        '--console', '-c',
-        action='store_true',
-        help='Запуск в консольном режиме без GUI'
-    )
-    
-    parser.add_argument(
-        '--check',
-        action='store_true',
-        help='Проверить доступность всех стендов и выйти'
-    )
-    
-    parser.add_argument(
-        '--version', '-v',
-        action='store_true',
-        help='Показать версию'
-    )
+    parser.add_argument('--console', '-c', action='store_true',
+                        help='Запуск в консольном режиме')
+    parser.add_argument('--check', action='store_true',
+                        help='Проверить доступность стендов')
+    parser.add_argument('--version', '-v', action='store_true',
+                        help='Показать версию')
     
     args = parser.parse_args()
     
-    # Версия
     if args.version:
         print("Bench Manager v1.0.0")
-        print("Стенды: ГОЗ (192.168.243.248)")
-        print("        Арктика (192.168.243.249)")
-        print("        C1M (192.168.243.254)")
-        print("        OrangePi (192.168.243.46)")
+        print("Стенды: ГОЗ, Арктика, C1M, OrangePi")
         return
     
-    # Проверка стендов
     if args.check:
-        print("=" * 60)
-        print("ПРОВЕРКА ДОСТУПНОСТИ СТЕНДОВ")
-        print("=" * 60)
-        
+        print("Проверка доступности стендов...")
         bc = BenchConnector()
         bc.start_monitoring()
         time.sleep(3)
@@ -274,17 +264,16 @@ def main():
         bc.stop_monitoring()
         return
     
-    # Консольный режим
     if args.console:
         run_console()
         return
     
-    # GUI режим (по умолчанию)
+    # GUI режим
     try:
         run_gui()
     except Exception as e:
         print(f"Ошибка запуска GUI: {e}")
-        print("Попробуйте консольный режим: python main.py --console")
+        print("Попробуйте: python main.py --console")
         sys.exit(1)
 
 
