@@ -5,10 +5,38 @@ Bench Manager - точка входа в приложение.
 
 import sys
 import os
+import time
 import argparse
 
+# ============================================================
+# ОПРЕДЕЛЕНИЕ ПУТЕЙ
+# ============================================================
+
+if getattr(sys, 'frozen', False):
+    # Запуск из EXE (PyInstaller)
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    # Запуск из Python
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Добавляем корень проекта в путь
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+# Путь к картинкам
+if getattr(sys, 'frozen', False):
+    IMAGES_DIR = os.path.join(sys._MEIPASS, "gui", "images")
+    SCRIPTS_DIR = os.path.join(sys._MEIPASS, "scripts")
+    CONFIG_FILE = os.path.join(sys._MEIPASS, "config.yaml")
+else:
+    IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
+    SCRIPTS_DIR = os.path.join(BASE_DIR, "scripts")
+    CONFIG_FILE = os.path.join(BASE_DIR, "config.yaml")
+
+
+# ============================================================
+# ИМПОРТЫ
+# ============================================================
 
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QIcon
@@ -21,25 +49,35 @@ from core.board_interface import BoardInterface
 from logger.log_manager import LogManager
 from gui.main_window import MainWindow
 
-# Путь к картинкам
-IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui", "images")
 
+# ============================================================
+# НАСТРОЙКА ЛОГИРОВАНИЯ
+# ============================================================
 
 def setup_logging():
     """Настраивает логирование"""
     logger = LogManager()
+    
+    log_file = os.path.join(BASE_DIR, "logs", "bench_manager.log")
+    
     logger.setup(
         level="INFO",
-        log_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "bench_manager.log")
+        log_file=log_file
     )
     return logger
 
+
+# ============================================================
+# ИНИЦИАЛИЗАЦИЯ МОДУЛЕЙ
+# ============================================================
 
 def init_core_modules():
     """Инициализирует модули ядра"""
     logger = setup_logging()
     logger.info("=" * 50)
     logger.info("Bench Manager запускается...")
+    logger.info(f"Версия: 1.0.0")
+    logger.info(f"Папка: {BASE_DIR}")
     logger.info("=" * 50)
     
     # Коннектор стендов
@@ -49,27 +87,36 @@ def init_core_modules():
     
     # Файловый трансфер
     ft = FileTransfer(bc)
+    logger.info("FileTransfer инициализирован")
     
     # Файловый менеджер
     fm = FileManager(bc)
+    logger.info("FileManager инициализирован")
     
     # Менеджер процессов
     pm = ProcessManager(bc)
+    logger.info("ProcessManager инициализирован")
     
     # Интерфейс плат
     bi = BoardInterface(bc)
+    logger.info("BoardInterface инициализирован")
     
-    logger.info("Все модули ядра инициализированы")
+    logger.info("Все модули ядра готовы")
     
     return bc, ft, fm, pm, bi, logger
 
+
+# ============================================================
+# GUI РЕЖИМ
+# ============================================================
 
 def run_gui():
     """Запускает графический интерфейс"""
     app = QApplication(sys.argv)
     app.setApplicationName("Bench Manager")
+    app.setApplicationVersion("1.0.0")
     
-    # Иконка
+    # Иконка приложения
     logo_path = os.path.join(IMAGES_DIR, "logo.png")
     if os.path.exists(logo_path):
         app.setWindowIcon(QIcon(logo_path))
@@ -87,6 +134,7 @@ def run_gui():
             color: #e0e0e0;
             border: 1px solid #4a4a8a;
             padding: 5px;
+            border-radius: 3px;
         }
     """)
     
@@ -96,6 +144,10 @@ def run_gui():
     
     sys.exit(app.exec_())
 
+
+# ============================================================
+# КОНСОЛЬНЫЙ РЕЖИМ
+# ============================================================
 
 def run_console():
     """Запускает консольный режим"""
@@ -108,32 +160,60 @@ def run_console():
     bc = BenchConnector()
     bc.start_monitoring()
     
-    print("\nДоступные стенды:")
-    time.sleep(2)
+    print("\nПоиск стендов...")
+    time.sleep(3)
     
+    print("\nДоступные стенды:")
     for name, info in bc.get_all_stands_info().items():
         status = "ONLINE" if info['status'] == 'online' else "OFFLINE"
         print(f"  {name:12} | {info['ip']:16} | {status}")
     
-    print("\nДля подключения используйте:")
-    print("  bc.connect_to_stand('ГОЗ')  # запросит пароль")
-    print("\nДоступные команды:")
-    print("  bc.execute_command('ГОЗ', 'ls -la /home/pkrv/CVS')")
+    print("\n" + "=" * 60)
+    print("Интерактивная консоль")
+    print("=" * 60)
+    print("\nДоступные объекты:")
+    print("  bc    - BenchConnector (подключение к стендам)")
+    print("  ft    - FileTransfer (загрузка/скачивание файлов)")
+    print("  fm    - FileManager (работа с папками)")
+    print("  pm    - ProcessManager (управление процессами)")
+    print("  bi    - BoardInterface (работа с платами)")
+    print("  logger - LogManager (логирование)")
+    print("\nПримеры команд:")
+    print("  bc.connect_to_stand('ГОЗ')")
     print("  bc.get_cvs_checksums('ГОЗ')")
     print("  bc.check_config_file('ГОЗ')")
-    print("  bc.archive_and_download_tmp('ГОЗ')")
-    print("\nИнтерактивная консоль. Введите 'exit' для выхода.")
+    print("  pm.get_process_list('ГОЗ')")
+    print("  bi.flash_firmware('ГОЗ', 'mpo')")
+    print("\nДля выхода введите: exit")
     
-    # Интерактивный режим
+    # Инициализируем остальные модули
+    ft = FileTransfer(bc)
+    fm = FileManager(bc)
+    pm = ProcessManager(bc)
+    bi = BoardInterface(bc)
+    
+    # Интерактивная сессия
     import code
     code.interact(
-        local=locals(),
-        banner="\nДоступные объекты: bc, logger"
+        local={
+            'bc': bc,
+            'ft': ft,
+            'fm': fm,
+            'pm': pm,
+            'bi': bi,
+            'logger': logger
+        },
+        banner=""
     )
     
     bc.stop_monitoring()
     bc.disconnect_all()
+    logger.info("Приложение закрыто")
 
+
+# ============================================================
+# ГЛАВНАЯ ФУНКЦИЯ
+# ============================================================
 
 def main():
     """Главная функция"""
@@ -171,21 +251,25 @@ def main():
     # Версия
     if args.version:
         print("Bench Manager v1.0.0")
-        print("Стенды: ГОЗ, Арктика, C1M, OrangePi")
+        print("Стенды: ГОЗ (192.168.243.248)")
+        print("        Арктика (192.168.243.249)")
+        print("        C1M (192.168.243.254)")
+        print("        OrangePi (192.168.243.46)")
         return
     
     # Проверка стендов
     if args.check:
-        print("Проверка доступности стендов...")
+        print("=" * 60)
+        print("ПРОВЕРКА ДОСТУПНОСТИ СТЕНДОВ")
+        print("=" * 60)
         
         bc = BenchConnector()
         bc.start_monitoring()
         time.sleep(3)
         
-        print("\nРезультаты:")
         for name, info in bc.get_all_stands_info().items():
             status = "ДОСТУПЕН" if info['status'] == 'online' else "НЕДОСТУПЕН"
-            print(f"  {name} ({info['ip']}): {status}")
+            print(f"  {name:12} ({info['ip']:16}) : {status}")
         
         bc.stop_monitoring()
         return
@@ -196,10 +280,13 @@ def main():
         return
     
     # GUI режим (по умолчанию)
-    run_gui()
+    try:
+        run_gui()
+    except Exception as e:
+        print(f"Ошибка запуска GUI: {e}")
+        print("Попробуйте консольный режим: python main.py --console")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Импорт time для задержки в проверке
-    import time
     main()
