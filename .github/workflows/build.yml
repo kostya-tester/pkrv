@@ -36,14 +36,9 @@ jobs:
         pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "scripts;scripts" --add-data "config.yaml;." main.py
     
     - name: Check EXE exists
+      shell: cmd
       run: |
-        if exist "dist\BenchManager.exe" (
-          echo EXE created successfully
-          dir dist\BenchManager.exe
-        ) else (
-          echo ERROR: EXE not found!
-          exit 1
-        )
+        if exist "dist\BenchManager.exe" (echo EXE created successfully && dir dist\BenchManager.exe) else (echo ERROR: EXE not found! && exit 1)
     
     - name: Upload EXE artifact
       uses: actions/upload-artifact@v4
@@ -52,7 +47,7 @@ jobs:
         path: dist/BenchManager.exe
         retention-days: 30
     
-    - name: Create Release (if tag)
+    - name: Create Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
