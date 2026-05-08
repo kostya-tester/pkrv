@@ -1,0 +1,94 @@
+# ============================================================
+# КОНФИГУРАЦИЯ BENCH MANAGER
+# ============================================================
+
+# Стенды
+stands:
+  - name: "ГОЗ"
+    ip: "192.168.243.248"
+    username: "pkrv"
+    port: 22
+    folders:
+      cvs: "/home/pkrv/CVS"
+      tmp: "/tmp"
+      config: "fpo_cfg"
+    board:
+      type: "основная"
+      can_flash: true
+      executable: "1po2_1n"
+      config_file: "1po2_1n.cfg"
+
+  - name: "Арктика"
+    ip: "192.168.243.249"
+    username: "pkrv"
+    port: 22
+    folders:
+      cvs: "/home/pkrv/CVS"
+      tmp: "/tmp"
+      config: "fpo_cfg"
+    board:
+      type: "основная"
+      can_flash: true
+      executable: "1po2_1n"
+      config_file: "1po2_1n.cfg"
+
+  - name: "C1M"
+    ip: "192.168.243.254"
+    username: "pkrv"
+    port: 22
+    folders:
+      cvs: "/home/pkrv/CVS"
+      tmp: "/tmp"
+      config: "fpo_cfg"
+    board:
+      type: "основная"
+      can_flash: true
+      executable: "1po2_1n"
+      config_file: "1po2_1n.cfg"
+
+  - name: "OrangePi"
+    ip: "192.168.243.46"
+    username: "orangepi"
+    port: 22
+    folders: {}
+    board:
+      type: "orange_pi"
+      can_flash: false
+      view_only: true
+
+# Мониторинг
+monitoring:
+  check_interval: 5  # секунды
+  ssh_timeout: 3     # секунды
+  auto_reconnect: false
+
+# Логирование
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  file: "logs/bench_manager.log"
+  max_size: 10485760  # 10 MB
+  backup_count: 5
+  console: true
+  colors: true
+
+# Пути
+paths:
+  downloads: "downloads"
+  uploads: "uploads"
+  backups: "backups"
+  scripts: "scripts"
+
+# Jenkins (если используется)
+jenkins:
+  enabled: false
+  url: "http://jenkins.local:8080"
+  username: "admin"
+  # password лучше передавать через переменную окружения JENKINS_TOKEN
+
+# GUI
+gui:
+  theme: "dark"
+  language: "ru"
+  refresh_interval: 3000  # мс
+  window_width: 1100
+  window_height: 750
