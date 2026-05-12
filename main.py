@@ -25,11 +25,6 @@ else:
 
 IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
 
-print(f"DEBUG: BASE_DIR = {BASE_DIR}")
-print(f"DEBUG: IMAGES_DIR = {IMAGES_DIR}")
-if os.path.exists(IMAGES_DIR):
-    print(f"DEBUG: files = {os.listdir(IMAGES_DIR)}")
-
 # ============================================================
 # ЛОГГЕР
 # ============================================================
@@ -123,24 +118,65 @@ class BenchConnector:
         self.logger.info("Мониторинг запущен")
     
     def stop_monitoring(self): self.monitoring = False
-    
+
     def connect(self, name, password=None):
-        if name not in self.stands: return False
-        info = self.stands[name]
-        if password is None: password = info.password
-        if not password: return False
-        try:
-            if os.name == 'nt':
-                cmd = f'echo {password} | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
-            else:
-                cmd = f'sshpass -p {password} ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-            if 'OK' in result.stdout:
-                info.connected = True
-                self.logger.info(f"Подключен к {name}")
-                return True
+        """Подключение к стенду через SSH с паролем"""
+        if name not in self.stands: 
             return False
-        except: return False
+        
+        info = self.stands[name]
+        if password is None: 
+            password = info.password
+        
+        if not password:
+            self.logger.error(f"Нет пароля для {name}")
+            return False
+        
+        self.logger.info(f"Подключение к {name} ({info.username}@{info.ip})...")
+        
+        try:
+            # Способ 1: sshpass (Linux/macOS)
+            if os.name != 'nt':
+                cmd = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} 'echo OK'"
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+                
+                if 'OK' in result.stdout:
+                    info.connected = True
+                    self.logger.info(f"Подключен к {name}")
+                    return True
+                else:
+                    self.logger.error(f"Ошибка подключения к {name}: {result.stderr.strip() or result.stdout.strip()}")
+                    return False
+            
+            # Способ 2: Windows
+            else:
+                # Пробуем несколько вариантов
+                commands = [
+                    # Вариант 1: ssh с передачей пароля через stdin
+                    f'echo {password} | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"',
+                    # Вариант 2: ssh с флагом пароля (если поддерживается)
+                    f'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 -o PasswordAuthentication=yes {info.username}@{info.ip} "echo OK"',
+                ]
+                
+                for cmd in commands:
+                    try:
+                        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+                        if 'OK' in result.stdout:
+                            info.connected = True
+                            self.logger.info(f"Подключен к {name}")
+                            return True
+                    except:
+                        continue
+                
+                self.logger.error(f"Не удалось подключиться к {name}. Проверьте пароль и доступность SSH.")
+                return False
+                    
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"Таймаут подключения к {name}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Ошибка подключения к {name}: {e}")
+            return False
     
     def disconnect(self, name):
         if name in self.stands:
@@ -152,9 +188,9 @@ class BenchConnector:
         info = self.stands[name]
         pwd = info.password
         if os.name == 'nt':
-            cmd = f'echo {pwd} | ssh -o StrictHostKeyChecking=no {info.username}@{info.ip} "{command}"'
+            cmd = f'echo {pwd} | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL {info.username}@{info.ip} "{command}"'
         else:
-            cmd = f'sshpass -p {pwd} ssh -o StrictHostKeyChecking=no {info.username}@{info.ip} "{command}"'
+            cmd = f"sshpass -p '{pwd}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {info.username}@{info.ip} '{command}'"
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
             return r.returncode == 0, r.stdout, r.stderr
@@ -194,7 +230,8 @@ def main():
         for name, info in bc.get_all_info().items():
             s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
             print(f"  {name} ({info['ip']}): {s}")
-        bc.auto_connect_all()
+        for name in ["ГОЗ", "Арктика", "C1M"]:
+            bc.connect(name)
         import code
         code.interact(local={'bc': bc})
         bc.stop_monitoring()
@@ -208,11 +245,10 @@ def main():
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
             QLineEdit, QGroupBox, QMessageBox, QInputDialog,
-            QFrame, QGridLayout, QScrollArea, QTreeWidget, QTreeWidgetItem,
-            QHeaderView
+            QFrame, QGridLayout, QScrollArea, QTreeWidget, QTreeWidgetItem
         )
         from PyQt5.QtCore import Qt, QTimer
-        from PyQt5.QtGui import QPixmap, QIcon, QColor, QFont
+        from PyQt5.QtGui import QPixmap, QIcon, QColor
         
         # ============================================================
         # КАРТИНКИ
@@ -326,26 +362,16 @@ def main():
         if logo_p:
             app.setWindowIcon(QIcon(logo_p))
         
-        # Стиль
         app.setStyleSheet("""
             QWidget { background-color: #1a1a2e; color: #e0e0e0; font-size: 12px; }
             QPushButton { background-color: #4a4ad2; color: white; border: none; border-radius: 5px; padding: 8px 14px; font-weight: bold; }
             QPushButton:hover { background-color: #5a5ae2; }
             QTabWidget::pane { border: 1px solid #3a3a6a; border-radius: 5px; background: #1e1e32; }
             QTabBar::tab { 
-                background: #2a2a4a; 
-                color: #8a8aaa; 
-                padding: 10px 25px; 
-                font-weight: bold; 
-                font-size: 13px;
-                text-align: center;
+                background: #2a2a4a; color: #8a8aaa; padding: 10px 25px; 
+                font-weight: bold; font-size: 13px; min-width: 120px;
             }
-            QTabBar::tab:selected { 
-                background: #1e1e32; 
-                color: #a0b0ff; 
-                border-bottom: 3px solid #4a4ad2; 
-            }
-            QTabBar::tab:hover { color: #cdd6f4; }
+            QTabBar::tab:selected { background: #1e1e32; color: #a0b0ff; border-bottom: 3px solid #4a4ad2; }
         """)
         
         window = QMainWindow()
@@ -359,16 +385,10 @@ def main():
         main_layout.setContentsMargins(10, 10, 10, 10)
         
         # ============================================================
-        # HEADER (БЕЛЫЙ ФОН)
+        # HEADER (БЕЛЫЙ)
         # ============================================================
         header = QFrame()
-        header.setStyleSheet("""
-            QFrame {
-                background-color: #ffffff;
-                border-radius: 10px;
-                border: 1px solid #e0e0e0;
-            }
-        """)
+        header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 10px; border: 1px solid #e0e0e0; }")
         header.setFixedHeight(65)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(15, 5, 15, 5)
@@ -396,15 +416,9 @@ def main():
         main_layout.addWidget(header)
         
         # ============================================================
-        # ВКЛАДКИ (по центру)
+        # ВКЛАДКИ
         # ============================================================
         tabs = QTabWidget()
-        tabs.setStyleSheet("""
-            QTabBar::tab { 
-                min-width: 120px;
-                text-align: center;
-            }
-        """)
         main_layout.addWidget(tabs)
         
         # ---- СТЕНДЫ ----
@@ -434,7 +448,7 @@ def main():
         btn_frame = QFrame()
         btn_frame.setStyleSheet("QFrame { background-color: #252545; border-radius: 8px; padding: 10px; }")
         btn_layout = QHBoxLayout(btn_frame)
-        btn_layout.setSpacing(10)
+        btn_layout.setSpacing(8)
         
         def update_cards():
             for name, card in stand_cards.items():
@@ -450,37 +464,34 @@ def main():
         def connect_stand(name):
             info = bc.stands[name]
             if info.status != "online":
-                QMessageBox.warning(window, "Ошибка", f"Стенд {name} не в сети!")
+                QMessageBox.warning(window, "Ошибка", f"Стенд {name} не в сети (OFFLINE)!")
                 return
-            card = stand_cards[name]
-            card.update_status("connecting", False)
+            stand_cards[name].update_status("connecting", False)
+            QApplication.processEvents()
             if bc.connect(name):
                 QMessageBox.information(window, "Успех", f"Подключен к {name}")
             else:
-                QMessageBox.critical(window, "Ошибка", f"Не удалось подключиться к {name}")
+                QMessageBox.critical(window, "Ошибка", f"Не удалось подключиться к {name}.\nПроверьте пароль и доступность SSH.")
             update_cards()
         
         def disconnect_stand(name):
             bc.disconnect(name)
             update_cards()
         
-        # Кнопки подключения для каждого стенда
+        # Кнопки для каждого стенда
         for stand_name in ["ГОЗ", "Арктика", "C1M", "OrangePi"]:
-            btn = QPushButton(f"ПОДКЛ. {stand_name.upper()}")
-            btn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 10px; } QPushButton:hover { background-color: #66bb6a; }")
-            btn.clicked.connect(lambda checked, n=stand_name: connect_stand(n))
-            btn_layout.addWidget(btn)
+            btn_conn = QPushButton(f"ПОДКЛ. {stand_name.upper()}")
+            btn_conn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 10px; } QPushButton:hover { background-color: #66bb6a; }")
+            btn_conn.clicked.connect(lambda checked, n=stand_name: connect_stand(n))
+            btn_layout.addWidget(btn_conn)
             
-            dbtn = QPushButton(f"ОТКЛ. {stand_name.upper()}")
-            dbtn.setStyleSheet("QPushButton { background-color: #d24a4a; font-size: 10px; } QPushButton:hover { background-color: #e25a5a; }")
-            dbtn.clicked.connect(lambda checked, n=stand_name: disconnect_stand(n))
-            btn_layout.addWidget(dbtn)
-            
-            btn_layout.addSpacing(5)
+            btn_disc = QPushButton(f"ОТКЛ. {stand_name.upper()}")
+            btn_disc.setStyleSheet("QPushButton { background-color: #d24a4a; font-size: 10px; } QPushButton:hover { background-color: #e25a5a; }")
+            btn_disc.clicked.connect(lambda checked, n=stand_name: disconnect_stand(n))
+            btn_layout.addWidget(btn_disc)
         
         stands_layout.addWidget(btn_frame)
         
-        # Обновить
         refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
         refresh_btn.clicked.connect(update_cards)
         stands_layout.addWidget(refresh_btn)
@@ -506,58 +517,61 @@ def main():
         sel_row.addStretch()
         proc_layout.addLayout(sel_row)
         
-        act_row = QHBoxLayout()
-        act_row.addStretch()
+        proc_log = QTextEdit()
+        proc_log.setReadOnly(True)
+        proc_log.setMaximumHeight(200)
+        proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 11px;")
+        proc_layout.addWidget(proc_log)
+        
+        def log_proc(msg):
+            proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
         
         def start_1po2():
             name = proc_stand.currentText()
             if bc.stands[name].connected:
                 ok, out, err = bc.execute(name, "cd /home/pkrv/fpo_cfg && nohup ./1po2_1n > /dev/null 2>&1 & echo $!")
                 if ok and out.strip().isdigit():
-                    proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {name}: 1po2_1n запущен (PID: {out.strip()})")
+                    log_proc(f"{name}: 1po2_1n запущен (PID: {out.strip()})")
                 else:
-                    proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {name}: Ошибка запуска - {err}")
+                    log_proc(f"{name}: Ошибка запуска - {err or out}")
             else:
-                proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {name}: Нет подключения")
+                log_proc(f"{name}: Нет подключения")
         
         def stop_1po2():
             name = proc_stand.currentText()
             if bc.stands[name].connected:
                 bc.execute(name, "pkill -f 1po2_1n 2>/dev/null; slay 1po2_1n 2>/dev/null")
-                proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {name}: 1po2_1n остановлен")
+                log_proc(f"{name}: 1po2_1n остановлен")
             else:
-                proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {name}: Нет подключения")
+                log_proc(f"{name}: Нет подключения")
         
         def restart_1po2():
             stop_1po2()
             time.sleep(1)
             start_1po2()
         
-        start_btn = QPushButton("ЗАПУСТИТЬ ./1po2_1n")
-        start_btn.setStyleSheet("QPushButton { background-color: #4caf50; } QPushButton:hover { background-color: #66bb6a; }")
+        act_row = QHBoxLayout()
+        act_row.addStretch()
+        
+        start_btn = QPushButton("ЗАПУСТИТЬ")
+        start_btn.setStyleSheet("QPushButton { background-color: #4caf50; }")
         start_btn.clicked.connect(start_1po2)
         act_row.addWidget(start_btn)
         
-        stop_btn = QPushButton("ОСТАНОВИТЬ (slay)")
-        stop_btn.setStyleSheet("QPushButton { background-color: #d24a4a; } QPushButton:hover { background-color: #e25a5a; }")
+        stop_btn = QPushButton("ОСТАНОВИТЬ")
+        stop_btn.setStyleSheet("QPushButton { background-color: #d24a4a; }")
         stop_btn.clicked.connect(stop_1po2)
         act_row.addWidget(stop_btn)
         
         restart_btn = QPushButton("ПЕРЕЗАПУСТИТЬ")
-        restart_btn.setStyleSheet("QPushButton { background-color: #ff9800; } QPushButton:hover { background-color: #ffb74d; }")
+        restart_btn.setStyleSheet("QPushButton { background-color: #ff9800; }")
         restart_btn.clicked.connect(restart_1po2)
         act_row.addWidget(restart_btn)
         
         act_row.addStretch()
         proc_layout.addLayout(act_row)
-        
-        proc_log = QTextEdit()
-        proc_log.setReadOnly(True)
-        proc_log.setMaximumHeight(250)
-        proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 11px;")
-        proc_layout.addWidget(proc_log)
-        
         proc_layout.addStretch()
+        
         tabs.addTab(proc_tab, "ПРОЦЕССЫ")
         
         # ---- ПЛАТЫ (ПРОСМОТР ФАЙЛОВ) ----
@@ -569,7 +583,6 @@ def main():
         board_title.setAlignment(Qt.AlignCenter)
         board_layout.addWidget(board_title)
         
-        # Выбор стенда и пути
         board_sel = QHBoxLayout()
         board_sel.addStretch()
         board_sel.addWidget(QLabel("Стенд:"))
@@ -577,7 +590,6 @@ def main():
         board_stand.addItems(list(bc.STANDS.keys()))
         board_stand.setMinimumWidth(150)
         board_sel.addWidget(board_stand)
-        
         board_sel.addWidget(QLabel("Путь:"))
         board_path = QLineEdit("/")
         board_path.setMinimumWidth(300)
@@ -585,82 +597,75 @@ def main():
         board_sel.addStretch()
         board_layout.addLayout(board_sel)
         
-        # Кнопки
-        board_btn_row = QHBoxLayout()
-        board_btn_row.addStretch()
-        
         board_file_tree = QTreeWidget()
         board_file_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-        board_file_tree.setAlternatingRowColors(True)
         board_file_tree.setStyleSheet("""
             QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 11px; }
             QTreeWidget::item { padding: 4px; }
             QTreeWidget::item:hover { background: #3a3a6a; }
             QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 5px; border: none; font-weight: bold; }
         """)
+        board_layout.addWidget(board_file_tree)
+        
+        board_log = QTextEdit()
+        board_log.setReadOnly(True)
+        board_log.setMaximumHeight(80)
+        board_layout.addWidget(board_log)
         
         def browse_files():
             name = board_stand.currentText()
             path = board_path.text().strip() or "/"
-            
             if bc.stands[name].connected:
                 board_file_tree.clear()
                 ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
                 if ok:
                     for line in out.split('\n'):
-                        if line.startswith('total') or not line.strip():
-                            continue
+                        if line.startswith('total') or not line.strip(): continue
                         parts = line.split()
                         if len(parts) >= 8:
                             fname = ' '.join(parts[7:])
-                            if fname in ['.', '..']:
-                                continue
+                            if fname in ['.', '..']: continue
                             is_dir = line.startswith('d')
                             size = parts[4] if not is_dir else ""
                             date = f"{parts[5]} {parts[6]}" if len(parts) > 6 else ""
                             item = QTreeWidgetItem([fname, size, "Папка" if is_dir else "Файл", date])
-                            if is_dir:
-                                item.setForeground(0, QColor("#61dafb"))
+                            if is_dir: item.setForeground(0, QColor("#61dafb"))
                             board_file_tree.addTopLevelItem(item)
-                    board_log.append(f"[OK] Загружено: {path}")
+                    board_log.append(f"[OK] {path}")
                 else:
                     board_log.append(f"[ОШИБКА] {err}")
             else:
                 board_log.append(f"[ОШИБКА] Стенд {name} не подключен")
         
-        def cd_to_folder():
+        def cd_folder():
             item = board_file_tree.currentItem()
             if item and item.text(2) == "Папка":
-                current = board_path.text().rstrip('/')
-                board_path.setText(f"{current}/{item.text(0)}")
+                cur = board_path.text().rstrip('/')
+                board_path.setText(f"{cur}/{item.text(0)}")
                 browse_files()
         
         def go_up():
-            current = board_path.text().rstrip('/')
-            if current != '/':
-                board_path.setText(os.path.dirname(current) or '/')
+            cur = board_path.text().rstrip('/')
+            if cur != '/':
+                board_path.setText(os.path.dirname(cur) or '/')
                 browse_files()
         
+        board_btn_row = QHBoxLayout()
+        board_btn_row.addStretch()
+        QPushButton("ОТКРЫТЬ", clicked=browse_files).setParent(None)
         browse_btn = QPushButton("ОТКРЫТЬ")
         browse_btn.clicked.connect(browse_files)
         board_btn_row.addWidget(browse_btn)
         
         cd_btn = QPushButton("ЗАЙТИ В ПАПКУ")
-        cd_btn.clicked.connect(cd_to_folder)
+        cd_btn.clicked.connect(cd_folder)
         board_btn_row.addWidget(cd_btn)
         
         up_btn = QPushButton("↑ НАВЕРХ")
         up_btn.clicked.connect(go_up)
         board_btn_row.addWidget(up_btn)
-        
         board_btn_row.addStretch()
         board_layout.addLayout(board_btn_row)
-        board_layout.addWidget(board_file_tree)
-        
-        board_log = QTextEdit()
-        board_log.setReadOnly(True)
-        board_log.setMaximumHeight(100)
-        board_layout.addWidget(board_log)
         
         tabs.addTab(board_tab, "ПЛАТЫ")
         
@@ -679,8 +684,13 @@ def main():
         timer.timeout.connect(update_cards)
         timer.start(3000)
         QTimer.singleShot(500, update_cards)
-        # Автоподключение
-        QTimer.singleShot(2000, lambda: [bc.connect(n) for n in ["ГОЗ", "Арктика", "C1M"] if bc.stands[n].status == "online"] or update_cards())
+        # Автоподключение через 2 сек
+        def auto_connect():
+            for n in ["ГОЗ", "Арктика", "C1M"]:
+                if bc.stands[n].status == "online":
+                    bc.connect(n)
+            update_cards()
+        QTimer.singleShot(2000, auto_connect)
         
         window.show()
         sys.exit(app.exec_())
