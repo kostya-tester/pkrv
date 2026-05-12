@@ -1,5 +1,6 @@
 """
 Bench Manager - полностью автономный файл с GUI и картинками.
+Поддержка старых SSH-алгоритмов для ГОСТ/Арктика/C1M.
 """
 
 import sys
@@ -48,23 +49,22 @@ class BenchConnector:
     
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
-    # SSH опции для старых алгоритмов: ключи + Kex + MAC
-    SSH_OPTS = (
-        "-o StrictHostKeyChecking=no "
-        "-o UserKnownHostsFile=/dev/null "
-        "-o HostKeyAlgorithms=+ssh-rsa,ssh-dss "
-        "-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 "
-        "-o MACs=hmac-md5,hmac-sha1,hmac-ripemd160,hmac-ripemd160@openssh.com,hmac-sha1-96,hmac-md5-96 "
-        "-o ConnectTimeout=10"
-    )
-    
-    SSH_OPTS_WIN = (
+    # Единые опции для старых стендов
+    OLD_SSH_OPTS = (
         "-o StrictHostKeyChecking=no "
         "-o UserKnownHostsFile=NUL "
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-dss "
         "-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 "
-        "-o MACs=hmac-md5,hmac-sha1,hmac-ripemd160,hmac-ripemd160@openssh.com,hmac-sha1-96,hmac-md5-96 "
+        "-o MACs=+hmac-md5,hmac-sha1,hmac-ripemd160,hmac-ripemd160@openssh.com,hmac-sha1-96,hmac-md5-96 "
+        "-o PubkeyAcceptedKeyTypes=+ssh-rsa "
+        "-o Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc,3des-cbc "
         "-o ConnectTimeout=10"
+    )
+    
+    NORMAL_SSH_OPTS = (
+        "-o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=NUL "
+        "-o ConnectTimeout=5"
     )
     
     def __init__(self):
@@ -104,12 +104,21 @@ class BenchConnector:
     
     def stop_monitoring(self): self.monitoring = False
 
-    def _ssh_opts(self, tty=False):
-        """Возвращает строку опций SSH"""
-        base = self.SSH_OPTS_WIN if os.name == 'nt' else self.SSH_OPTS
+    def _ssh_cmd(self, name, remote_cmd, tty=False, timeout=10):
+        """Создаёт и выполняет SSH команду с правильными опциями"""
+        info = self.stands[name]
+        
+        # Для старых стендов - полные опции совместимости
+        if name in self.STANDS:
+            opts = self.OLD_SSH_OPTS
+        else:
+            opts = self.NORMAL_SSH_OPTS
+        
         if tty:
-            base = "-tt " + base
-        return base
+            opts = "-tt " + opts
+        
+        cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
+        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
 
     def connect(self, name, password=None):
         """Подключение к стенду. Возвращает (успех, сообщение)."""
@@ -131,17 +140,13 @@ class BenchConnector:
     def _connect_simple(self, name, info, password):
         """Обычное SSH подключение (OrangePi)"""
         try:
-            opts = self._ssh_opts(tty=False)
-            cmd = f'ssh {opts} {info.username}@{info.ip} "echo OK"'
-            
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            result = self._ssh_cmd(name, "echo OK", tty=False, timeout=10)
             
             if 'OK' in result.stdout:
                 info.connected = True
                 return True, f"Подключен к {name}"
             
-            err = f"Не удалось подключиться.\n\nОтвет:\n{result.stdout.strip()[-200:]}\n\nSTDERR:\n{result.stderr.strip()[-200:]}"
-            return False, err
+            return False, f"Не удалось подключиться.\n\nОтвет:\n{result.stdout.strip()[-200:]}\n\nSTDERR:\n{result.stderr.strip()[-200:]}"
         except subprocess.TimeoutExpired:
             return False, "Таймаут подключения (10 секунд)"
         except Exception as e:
@@ -151,10 +156,7 @@ class BenchConnector:
         """SSH → su → qconn"""
         try:
             remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-            opts = self._ssh_opts(tty=True)
-            cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
-            
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20)
+            result = self._ssh_cmd(name, remote_cmd, tty=True, timeout=20)
             
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
@@ -173,7 +175,7 @@ class BenchConnector:
             elif 'Connection refused' in stderr:
                 error_msg += "SSH-соединение отклонено (порт 22)."
             elif 'no matching MAC' in stderr:
-                error_msg += "Несовместимые алгоритмы шифрования (MAC)."
+                error_msg += "Несовместимые алгоритмы шифрования (MAC).\nПопробуйте обновить OpenSSH или использовать plink.exe"
             elif 'no matching host key' in stderr:
                 error_msg += "Несовместимые алгоритмы ключей."
             elif 'no matching key exchange' in stderr:
@@ -211,12 +213,9 @@ class BenchConnector:
         else:
             full_cmd = command
         
-        opts = self._ssh_opts(tty=True)
-        cmd = f'ssh {opts} {info.username}@{info.ip} "{full_cmd}"'
-        
         try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-            return r.returncode == 0, r.stdout, r.stderr
+            result = self._ssh_cmd(name, full_cmd, tty=True, timeout=timeout)
+            return result.returncode == 0, result.stdout, result.stderr
         except:
             return False, "", "Ошибка выполнения"
     
@@ -422,7 +421,6 @@ def main():
         self_status = QLabel("ЗАГРУЗКА...")
         self_status.setStyleSheet("color: #666; font-size: 13px; font-weight: bold; background: transparent;")
         header_layout.addWidget(self_status)
-        
         main_layout.addWidget(header)
         
         tabs = QTabWidget()
@@ -462,12 +460,10 @@ def main():
         stands_tab = QWidget()
         stands_layout = QVBoxLayout(stands_tab)
         stands_layout.setAlignment(Qt.AlignCenter)
-        
         cards_widget = QWidget()
         cards_layout = QHBoxLayout(cards_widget)
         cards_layout.setSpacing(25)
         cards_layout.setAlignment(Qt.AlignCenter)
-        
         for name in main_stands:
             info = bc.stands[name]
             card = StandCard(name, info.ip, info.username, info.stand_type)
@@ -475,9 +471,7 @@ def main():
             stand_cards[name] = card
             card.connect_btn.clicked.connect(lambda checked, n=name: connect_stand(n))
             card.disconnect_btn.clicked.connect(lambda checked, n=name: disconnect_stand(n))
-        
         stands_layout.addWidget(cards_widget, alignment=Qt.AlignCenter)
-        
         refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
         refresh_btn.setMaximumWidth(220)
         refresh_btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
@@ -490,7 +484,6 @@ def main():
         orange_layout = QVBoxLayout(orange_tab)
         orange_layout.setAlignment(Qt.AlignCenter)
         orange_layout.addWidget(QLabel("OrangePi", alignment=Qt.AlignCenter, styleSheet="color: #a0b0ff; font-size: 18px; font-weight: bold;"))
-        
         op_info = bc.stands["OrangePi"]
         op_card = StandCard("OrangePi", op_info.ip, op_info.username, op_info.stand_type)
         op_card.connect_btn.clicked.connect(lambda: connect_stand("OrangePi"))
@@ -498,7 +491,6 @@ def main():
         stand_cards["OrangePi"] = op_card
         orange_layout.addWidget(op_card, alignment=Qt.AlignCenter)
         orange_layout.addStretch()
-        
         refresh_op_btn = QPushButton("ОБНОВИТЬ СТАТУС")
         refresh_op_btn.setMaximumWidth(220)
         refresh_op_btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
@@ -509,7 +501,6 @@ def main():
         # Вкладка ФАЙЛЫ СТЕНДОВ
         files_tab = QWidget()
         files_layout = QVBoxLayout(files_tab)
-        
         files_sel = QHBoxLayout()
         files_sel.addStretch()
         files_sel.addWidget(QLabel("Стенд:"))
@@ -523,7 +514,6 @@ def main():
         files_sel.addWidget(files_path)
         files_sel.addStretch()
         files_layout.addLayout(files_sel)
-        
         quick_row = QHBoxLayout()
         quick_row.addStretch()
         for path, label in [("/home/pkrv/CVS", "📁 CVS"), ("/tmp", "📁 /tmp"), ("/fead_hd", "📁 fead_hd")]:
@@ -533,17 +523,14 @@ def main():
             quick_row.addWidget(btn)
         quick_row.addStretch()
         files_layout.addLayout(quick_row)
-        
         files_tree = QTreeWidget()
         files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
         files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
         files_layout.addWidget(files_tree)
-        
         files_log = QTextEdit()
         files_log.setReadOnly(True)
         files_log.setMaximumHeight(50)
         files_layout.addWidget(files_log)
-        
         def browse_stand_files():
             name = files_stand.currentText()
             path = files_path.text().strip() or "/"
@@ -566,19 +553,16 @@ def main():
                     files_log.append(f"[ОШИБКА] {err}")
             else:
                 files_log.append(f"[ОШИБКА] Стенд {name} не подключен")
-        
         def cd_stand_folder():
             item = files_tree.currentItem()
             if item and item.text(2) == "Папка":
                 files_path.setText(f"{files_path.text().rstrip('/')}/{item.text(0)}")
                 browse_stand_files()
-        
         def up_stand():
             cur = files_path.text().rstrip('/')
             if cur != '/':
                 files_path.setText(os.path.dirname(cur) or '/')
                 browse_stand_files()
-        
         files_btn_row = QHBoxLayout()
         files_btn_row.addStretch()
         files_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_stand_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
@@ -591,7 +575,6 @@ def main():
         # Вкладка ФАЙЛЫ ORANGEPI
         op_files_tab = QWidget()
         op_files_layout = QVBoxLayout(op_files_tab)
-        
         op_files_sel = QHBoxLayout()
         op_files_sel.addStretch()
         op_files_sel.addWidget(QLabel("Стенд:"))
@@ -604,17 +587,14 @@ def main():
         op_files_sel.addWidget(op_files_path)
         op_files_sel.addStretch()
         op_files_layout.addLayout(op_files_sel)
-        
         op_files_tree = QTreeWidget()
         op_files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
         op_files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
         op_files_layout.addWidget(op_files_tree)
-        
         op_files_log = QTextEdit()
         op_files_log.setReadOnly(True)
         op_files_log.setMaximumHeight(50)
         op_files_layout.addWidget(op_files_log)
-        
         def browse_op_files():
             name = op_files_stand.currentText()
             path = op_files_path.text().strip() or "/"
@@ -637,19 +617,16 @@ def main():
                     op_files_log.append(f"[ОШИБКА] {err}")
             else:
                 op_files_log.append(f"[ОШИБКА] Стенд {name} не подключен")
-        
         def cd_op_folder():
             item = op_files_tree.currentItem()
             if item and item.text(2) == "Папка":
                 op_files_path.setText(f"{op_files_path.text().rstrip('/')}/{item.text(0)}")
                 browse_op_files()
-        
         def up_op():
             cur = op_files_path.text().rstrip('/')
             if cur != '/':
                 op_files_path.setText(os.path.dirname(cur) or '/')
                 browse_op_files()
-        
         op_btn_row = QHBoxLayout()
         op_btn_row.addStretch()
         op_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_op_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
@@ -663,7 +640,6 @@ def main():
         proc_tab = QWidget()
         proc_layout = QVBoxLayout(proc_tab)
         proc_layout.addWidget(QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ", alignment=Qt.AlignCenter, styleSheet="color: #a0b0ff; font-size: 18px; font-weight: bold;"))
-        
         sel_row = QHBoxLayout()
         sel_row.addStretch()
         sel_row.addWidget(QLabel("Стенд:"))
@@ -673,16 +649,12 @@ def main():
         sel_row.addWidget(proc_stand)
         sel_row.addStretch()
         proc_layout.addLayout(sel_row)
-        
         proc_log = QTextEdit()
         proc_log.setReadOnly(True)
         proc_log.setMaximumHeight(250)
         proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 12px;")
         proc_layout.addWidget(proc_log)
-        
-        def log_proc(msg):
-            proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        
+        def log_proc(msg): proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
         def start_1po2():
             name = proc_stand.currentText()
             if bc.stands[name].connected:
@@ -690,19 +662,16 @@ def main():
                 if ok: log_proc(f"{name}: 1po2_1n запущен (PID: {out.strip()})")
                 else: log_proc(f"{name}: Ошибка - {err}")
             else: log_proc(f"{name}: Нет подключения")
-        
         def stop_1po2():
             name = proc_stand.currentText()
             if bc.stands[name].connected:
                 bc.execute(name, "pkill -f 1po2_1n; slay 1po2_1n 2>/dev/null")
                 log_proc(f"{name}: 1po2_1n остановлен")
             else: log_proc(f"{name}: Нет подключения")
-        
         def restart_1po2():
             stop_1po2()
             time.sleep(1)
             start_1po2()
-        
         act_row = QHBoxLayout()
         act_row.addStretch()
         act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=start_1po2, styleSheet="QPushButton{background:#4caf50; font-size:13px; padding:10px 20px;}"))
@@ -733,7 +702,6 @@ def main():
         
     except ImportError as e:
         print(f"PyQt5 не установлен: {e}")
-        print("Установите: pip install PyQt5")
         bc.stop_monitoring()
         sys.exit(1)
 
