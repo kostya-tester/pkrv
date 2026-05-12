@@ -1,6 +1,6 @@
 """
 Bench Manager - полностью автономный файл с GUI и картинками.
-Поддержка старых SSH-алгоритмов для ГОСТ/Арктика/C1M.
+Использует plink.exe для старых стендов (ГОЗ/Арктика/C1M).
 """
 
 import sys
@@ -24,6 +24,18 @@ else:
     APP_DIR = BASE_DIR
 
 IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
+
+# Путь к plink.exe
+PLINK_PATH = None
+if getattr(sys, 'frozen', False):
+    plink_candidate = os.path.join(sys._MEIPASS, "plink.exe")
+    if os.path.exists(plink_candidate):
+        PLINK_PATH = plink_candidate
+else:
+    for p in [os.path.join(APP_DIR, "plink.exe"), os.path.join(APP_DIR, "tools", "plink.exe")]:
+        if os.path.exists(p):
+            PLINK_PATH = p
+            break
 
 # ============================================================
 # КОННЕКТОР СТЕНДОВ
@@ -49,23 +61,7 @@ class BenchConnector:
     
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
-    # Единые опции для старых стендов
-    OLD_SSH_OPTS = (
-        "-o StrictHostKeyChecking=no "
-        "-o UserKnownHostsFile=NUL "
-        "-o HostKeyAlgorithms=+ssh-rsa,ssh-dss "
-        "-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 "
-        "-o MACs=+hmac-md5,hmac-sha1,hmac-ripemd160,hmac-ripemd160@openssh.com,hmac-sha1-96,hmac-md5-96 "
-        "-o PubkeyAcceptedKeyTypes=+ssh-rsa "
-        "-o Ciphers=+aes128-cbc,aes192-cbc,aes256-cbc,3des-cbc "
-        "-o ConnectTimeout=10"
-    )
-    
-    NORMAL_SSH_OPTS = (
-        "-o StrictHostKeyChecking=no "
-        "-o UserKnownHostsFile=NUL "
-        "-o ConnectTimeout=5"
-    )
+    NORMAL_SSH_OPTS = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5"
     
     def __init__(self):
         self.stands = {}
@@ -105,19 +101,20 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def _ssh_cmd(self, name, remote_cmd, tty=False, timeout=10):
-        """Создаёт и выполняет SSH команду с правильными опциями"""
+        """Выполняет SSH команду. Для старых стендов использует plink.exe."""
         info = self.stands[name]
         
-        # Для старых стендов - полные опции совместимости
-        if name in self.STANDS:
-            opts = self.OLD_SSH_OPTS
+        # Для старых стендов с plink
+        if name in self.STANDS and PLINK_PATH:
+            if tty:
+                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -t {info.username}@{info.ip} "{remote_cmd}"'
+            else:
+                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} {info.username}@{info.ip} "{remote_cmd}"'
         else:
             opts = self.NORMAL_SSH_OPTS
+            if tty: opts = "-tt " + opts
+            cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
         
-        if tty:
-            opts = "-tt " + opts
-        
-        cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
         return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
 
     def connect(self, name, password=None):
@@ -153,7 +150,7 @@ class BenchConnector:
             return False, f"Ошибка: {e}"
     
     def _connect_with_su(self, name, info, password):
-        """SSH → su → qconn"""
+        """SSH → su → qconn (через plink для старых стендов)"""
         try:
             remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
             result = self._ssh_cmd(name, remote_cmd, tty=True, timeout=20)
@@ -174,26 +171,15 @@ class BenchConnector:
                 error_msg += "Неверный логин или пароль SSH."
             elif 'Connection refused' in stderr:
                 error_msg += "SSH-соединение отклонено (порт 22)."
-            elif 'no matching MAC' in stderr:
-                error_msg += "Несовместимые алгоритмы шифрования (MAC).\nПопробуйте обновить OpenSSH или использовать plink.exe"
-            elif 'no matching host key' in stderr:
-                error_msg += "Несовместимые алгоритмы ключей."
-            elif 'no matching key exchange' in stderr:
-                error_msg += "Несовместимые алгоритмы обмена ключами."
             else:
-                if stdout:
-                    error_msg += f"Ответ сервера:\n{stdout[-400:]}"
-                if stderr:
-                    error_msg += f"\n\nSTDERR:\n{stderr[-400:]}"
-                if not stdout and not stderr:
-                    error_msg += "Сервер не вернул ответ."
+                if stdout: error_msg += f"Ответ сервера:\n{stdout[-400:]}"
+                if stderr: error_msg += f"\n\nSTDERR:\n{stderr[-400:]}"
+                if not stdout and not stderr: error_msg += "Сервер не вернул ответ."
             
             return False, error_msg
                 
         except subprocess.TimeoutExpired:
             return False, f"Таймаут подключения к {name} (20 секунд)."
-        except FileNotFoundError:
-            return False, "Команда ssh не найдена!\nУстановите OpenSSH Client."
         except Exception as e:
             return False, f"Ошибка: {type(e).__name__}: {e}"
     
@@ -506,7 +492,6 @@ def main():
         files_sel.addWidget(QLabel("Стенд:"))
         files_stand = QComboBox()
         files_stand.addItems(main_stands)
-        files_stand.setMinimumWidth(180)
         files_sel.addWidget(files_stand)
         files_sel.addWidget(QLabel("Путь:"))
         files_path = QLineEdit("/home/pkrv/CVS")
@@ -645,7 +630,6 @@ def main():
         sel_row.addWidget(QLabel("Стенд:"))
         proc_stand = QComboBox()
         proc_stand.addItems(main_stands)
-        proc_stand.setMinimumWidth(180)
         sel_row.addWidget(proc_stand)
         sel_row.addStretch()
         proc_layout.addLayout(sel_row)
@@ -668,10 +652,7 @@ def main():
                 bc.execute(name, "pkill -f 1po2_1n; slay 1po2_1n 2>/dev/null")
                 log_proc(f"{name}: 1po2_1n остановлен")
             else: log_proc(f"{name}: Нет подключения")
-        def restart_1po2():
-            stop_1po2()
-            time.sleep(1)
-            start_1po2()
+        def restart_1po2(): stop_1po2(); time.sleep(1); start_1po2()
         act_row = QHBoxLayout()
         act_row.addStretch()
         act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=start_1po2, styleSheet="QPushButton{background:#4caf50; font-size:13px; padding:10px 20px;}"))
