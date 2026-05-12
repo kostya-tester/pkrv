@@ -123,64 +123,155 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def connect(self, name, password=None):
-        if name not in self.stands: return False
-        info = self.stands[name]
-        if password is None: password = info.password
-        if not password: return False
+        """Подключение к стенду с подробным логированием ошибок"""
+        if name not in self.stands: 
+            self.logger.error(f"Стенд {name} не найден в конфигурации")
+            return False
         
-        self.logger.info(f"Подключение к {name} ({info.username}@{info.ip})...")
+        info = self.stands[name]
+        if password is None: 
+            password = info.password
+        
+        if not password:
+            self.logger.error(f"Нет пароля для стенда {name}")
+            return False
+        
+        self.logger.info(f"=" * 50)
+        self.logger.info(f"ПОДКЛЮЧЕНИЕ К {name} ({info.username}@{info.ip})")
+        self.logger.info(f"=" * 50)
         
         if name in self.STANDS:
-            return self._connect_with_su(name, info, password)
+            result = self._connect_with_su(name, info, password)
         else:
-            return self._connect_simple(name, info, password)
+            result = self._connect_simple(name, info, password)
+        
+        if not result:
+            self.logger.error(f"НЕ УДАЛОСЬ ПОДКЛЮЧИТЬСЯ к {name}")
+            self.logger.error(f"Проверьте:")
+            self.logger.error(f"  1. Стенд доступен по SSH: ssh {info.username}@{info.ip}")
+            self.logger.error(f"  2. Пароль правильный: {password}")
+            self.logger.error(f"  3. Команда su работает на стенде")
+        
+        return result
     
     def _connect_simple(self, name, info, password):
+        """Обычное SSH подключение (OrangePi)"""
         try:
             if os.name == 'nt':
                 cmd = f'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
             else:
                 cmd = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} 'echo OK'"
+            
+            self.logger.info(f"Выполняю: {cmd}")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            
+            self.logger.info(f"Код возврата: {result.returncode}")
+            self.logger.info(f"STDOUT: {result.stdout.strip()}")
+            if result.stderr.strip():
+                self.logger.info(f"STDERR: {result.stderr.strip()}")
+            
             if 'OK' in result.stdout:
                 info.connected = True
-                self.logger.info(f"Подключен к {name}")
+                self.logger.info(f"✓ Подключен к {name}")
                 return True
+            
+            self.logger.error(f"✗ Не подключен. Ответ: {result.stdout.strip()}")
             return False
-        except: return False
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"✗ Таймаут подключения к {name} (10 секунд)")
+            return False
+        except Exception as e:
+            self.logger.error(f"✗ Ошибка: {e}")
+            return False
     
     def _connect_with_su(self, name, info, password):
+        """SSH → su → qconn для ГОЗ/Арктика/C1M с детальным логом"""
         try:
+            # Команда внутри стенда: передаём пароль в su, выполняем qconn, проверяем папку
+            remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
+            
             if os.name == 'nt':
-                remote_cmd = f"echo {password} | su -c 'qconn && ls /home/pkrv/CVS > /dev/null && echo OK || echo FAIL'"
                 cmd = f'ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=10 {info.username}@{info.ip} "{remote_cmd}"'
             else:
-                remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null && echo OK || echo FAIL'"
                 cmd = f"sshpass -p '{password}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 {info.username}@{info.ip} '{remote_cmd}'"
             
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+            self.logger.info(f"Команда SSH: ssh {info.username}@{info.ip}")
+            self.logger.info(f"Удалённая команда: echo *** | su -c 'qconn && ls /home/pkrv/CVS && echo OK'")
+            self.logger.info(f"Ожидание ответа (таймаут 20с)...")
             
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20)
+            
+            # Подробный вывод для отладки
+            self.logger.info(f"Код возврата: {result.returncode}")
+            
+            stdout_preview = result.stdout.strip()
+            stderr_preview = result.stderr.strip()
+            
+            if stdout_preview:
+                self.logger.info(f"STDOUT (последние 300 символов):")
+                self.logger.info(stdout_preview[-300:])
+            else:
+                self.logger.info(f"STDOUT: (пусто)")
+            
+            if stderr_preview:
+                self.logger.info(f"STDERR:")
+                self.logger.info(stderr_preview[-300:])
+            
+            # Анализируем ответ
             if 'OK' in result.stdout:
                 info.connected = True
-                self.logger.info(f"Подключен к {name} (su + qconn)")
+                self.logger.info(f"✓ Подключен к {name} (su + qconn выполнены успешно)")
                 return True
-            else:
-                self.logger.error(f"Ошибка подключения к {name}")
+            elif 'FAIL' in result.stdout:
+                self.logger.error(f"✗ su или qconn не сработали. Ответ: {stdout_preview[-200:]}")
                 return False
-        except: return False
+            elif 'Permission denied' in result.stdout or 'Permission denied' in result.stderr:
+                self.logger.error(f"✗ Ошибка доступа. Неверный пароль?")
+                return False
+            elif 'Connection refused' in result.stderr:
+                self.logger.error(f"✗ SSH-соединение отклонено. Порт 22 закрыт?")
+                return False
+            elif 'Connection timed out' in result.stderr or 'timed out' in stdout_preview:
+                self.logger.error(f"✗ Таймаут соединения. Стенд не отвечает.")
+                return False
+            elif 'No route to host' in result.stderr:
+                self.logger.error(f"✗ Нет маршрута до стенда. Проверьте сеть.")
+                return False
+            elif 'Host key verification failed' in result.stderr:
+                self.logger.error(f"✗ Ключ хоста не совпадает.")
+                return False
+            else:
+                self.logger.error(f"✗ Неизвестная ошибка. Полный ответ:")
+                self.logger.error(f"  STDOUT: {stdout_preview}")
+                self.logger.error(f"  STDERR: {stderr_preview}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error(f"✗ Таймаут подключения к {name} (20 секунд)")
+            self.logger.error(f"  Стенд не ответил за отведённое время")
+            return False
+        except FileNotFoundError:
+            self.logger.error(f"✗ Команда ssh не найдена!")
+            self.logger.error(f"  Установите OpenSSH: Добавить компонент → OpenSSH Client")
+            return False
+        except Exception as e:
+            self.logger.error(f"✗ Исключение Python: {type(e).__name__}: {e}")
+            return False
     
     def disconnect(self, name):
         if name in self.stands:
             self.stands[name].connected = False
+            self.logger.info(f"Отключен от {name}")
     
     def execute(self, name, command, timeout=30):
+        """Выполнение команды через su"""
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
         pwd = info.password
         
         if name in self.STANDS:
-            full_cmd = f"echo {pwd} | su -c 'qconn && {command}'"
+            full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
         else:
             full_cmd = command
         
@@ -192,7 +283,9 @@ class BenchConnector:
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
             return r.returncode == 0, r.stdout, r.stderr
-        except: return False, "", "Ошибка"
+        except Exception as e:
+            self.logger.error(f"Ошибка выполнения команды: {e}")
+            return False, "", str(e)
     
     def get_all_info(self):
         return {name: s.to_dict() for name, s in self.stands.items()}
@@ -236,7 +329,7 @@ def main():
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
             QLineEdit, QMessageBox, QFrame, QScrollArea,
-            QTreeWidget, QTreeWidgetItem, QSizePolicy
+            QTreeWidget, QTreeWidgetItem
         )
         from PyQt5.QtCore import Qt, QTimer
         from PyQt5.QtGui import QPixmap, QIcon, QColor
@@ -264,8 +357,7 @@ def main():
             pix.fill(QColor("#2a2a4a"))
             return pix
         
-        def load_logo(width=240, height=70):
-            """Загружает логотип с сохранением пропорций и качества"""
+        def load_logo(width=260, height=65):
             paths = [os.path.join(IMAGES_DIR, "logo.png"), os.path.join(BASE_DIR, "gui", "images", "logo.png")]
             for p in paths:
                 if os.path.exists(p):
@@ -481,7 +573,7 @@ def main():
         main_layout.setContentsMargins(15, 15, 15, 15)
         
         # ============================================================
-        # HEADER (БЕЛЫЙ) - ЛОГОТИП БЕЗ ИСКАЖЕНИЙ
+        # HEADER (БЕЛЫЙ)
         # ============================================================
         header = QFrame()
         header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
@@ -490,7 +582,7 @@ def main():
         header_layout.setContentsMargins(25, 10, 25, 10)
         
         logo_header = QLabel()
-        lp = load_logo(260, 65)  # Увеличенный логотип
+        lp = load_logo(260, 65)
         if lp:
             logo_header.setPixmap(lp)
             logo_header.setFixedSize(260, 65)
@@ -541,14 +633,21 @@ def main():
             if bc.connect(name):
                 QMessageBox.information(window, "Успех", f"Подключен к {name}\n(выполнено: su + qconn)")
             else:
-                QMessageBox.critical(window, "Ошибка", f"Не удалось подключиться к {name}")
+                # Показываем детальную ошибку
+                QMessageBox.critical(window, "Ошибка подключения", 
+                    f"Не удалось подключиться к {name}.\n\n"
+                    f"Проверьте консоль (логи) для деталей.\n"
+                    f"Убедитесь, что:\n"
+                    f"1. Стенд доступен: ssh pkrv@{info.ip}\n"
+                    f"2. Пароль правильный\n"
+                    f"3. Команда su работает на стенде")
             update_cards()
         
         def disconnect_stand(name):
             bc.disconnect(name)
             update_cards()
         
-        # ---- ВКЛАДКА 1: СТЕНДЫ (по центру) ----
+        # ---- ВКЛАДКА 1: СТЕНДЫ ----
         stands_tab = QWidget()
         stands_layout = QVBoxLayout(stands_tab)
         stands_layout.setAlignment(Qt.AlignCenter)
