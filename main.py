@@ -48,12 +48,13 @@ class BenchConnector:
     
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
-    # SSH опции для старых алгоритмов
+    # SSH опции для старых алгоритмов: ключи + Kex + MAC
     SSH_OPTS = (
         "-o StrictHostKeyChecking=no "
         "-o UserKnownHostsFile=/dev/null "
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-dss "
         "-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 "
+        "-o MACs=hmac-md5,hmac-sha1,hmac-ripemd160,hmac-ripemd160@openssh.com,hmac-sha1-96,hmac-md5-96 "
         "-o ConnectTimeout=10"
     )
     
@@ -62,6 +63,7 @@ class BenchConnector:
         "-o UserKnownHostsFile=NUL "
         "-o HostKeyAlgorithms=+ssh-rsa,ssh-dss "
         "-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 "
+        "-o MACs=hmac-md5,hmac-sha1,hmac-ripemd160,hmac-ripemd160@openssh.com,hmac-sha1-96,hmac-md5-96 "
         "-o ConnectTimeout=10"
     )
     
@@ -138,14 +140,15 @@ class BenchConnector:
                 info.connected = True
                 return True, f"Подключен к {name}"
             
-            return False, f"Не удалось подключиться.\n\nОтвет:\n{result.stdout.strip()[-200:]}\n\nSTDERR:\n{result.stderr.strip()[-200:]}"
+            err = f"Не удалось подключиться.\n\nОтвет:\n{result.stdout.strip()[-200:]}\n\nSTDERR:\n{result.stderr.strip()[-200:]}"
+            return False, err
         except subprocess.TimeoutExpired:
             return False, "Таймаут подключения (10 секунд)"
         except Exception as e:
             return False, f"Ошибка: {e}"
     
     def _connect_with_su(self, name, info, password):
-        """SSH → su → qconn. Возвращает (успех, сообщение_с_диагностикой)."""
+        """SSH → su → qconn"""
         try:
             remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
             opts = self._ssh_opts(tty=True)
@@ -156,22 +159,25 @@ class BenchConnector:
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
             
-            # Успех
             if 'OK' in stdout:
                 info.connected = True
                 return True, f"Подключен к {name}\n(su + qconn выполнены)"
             
-            # Диагностика ошибки
             error_msg = f"Не удалось подключиться к {name}.\n\n"
             error_msg += f"Хост: {info.username}@{info.ip}\n\n"
             
             if 'FAIL' in stdout:
-                error_msg += "Пароль SSH принят, но su или qconn не сработали.\n"
-                error_msg += "Проверьте пароль на стенде."
+                error_msg += "Пароль SSH принят, но su или qconn не сработали."
             elif 'Permission denied' in stdout or 'Permission denied' in stderr:
                 error_msg += "Неверный логин или пароль SSH."
             elif 'Connection refused' in stderr:
                 error_msg += "SSH-соединение отклонено (порт 22)."
+            elif 'no matching MAC' in stderr:
+                error_msg += "Несовместимые алгоритмы шифрования (MAC)."
+            elif 'no matching host key' in stderr:
+                error_msg += "Несовместимые алгоритмы ключей."
+            elif 'no matching key exchange' in stderr:
+                error_msg += "Несовместимые алгоритмы обмена ключами."
             else:
                 if stdout:
                     error_msg += f"Ответ сервера:\n{stdout[-400:]}"
@@ -261,10 +267,6 @@ def main():
         from PyQt5.QtCore import Qt, QTimer
         from PyQt5.QtGui import QPixmap, QIcon, QColor
         
-        # ============================================================
-        # КАРТИНКИ
-        # ============================================================
-        
         STAND_IMAGES = {
             "ГОЗ": "goz.png", "Арктика": "arktika.png",
             "C1M": "c1m.png", "OrangePi": "orangepi.png"
@@ -289,10 +291,6 @@ def main():
                     if not pix.isNull():
                         return pix.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             return None
-        
-        # ============================================================
-        # КАРТОЧКА СТЕНДА
-        # ============================================================
         
         class StandCard(QFrame):
             def __init__(self, name, ip, username, stand_type):
@@ -374,10 +372,6 @@ def main():
                     self.connect_btn.setEnabled(status == "online")
                     self.disconnect_btn.setEnabled(False)
         
-        # ============================================================
-        # ОКНО
-        # ============================================================
-        
         app = QApplication(sys.argv)
         logo_p = load_logo()
         if logo_p: app.setWindowIcon(QIcon(logo_p))
@@ -401,9 +395,7 @@ def main():
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # ============================================================
-        # HEADER
-        # ============================================================
+        # Header
         header = QFrame()
         header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
         header.setFixedHeight(80)
@@ -433,9 +425,6 @@ def main():
         
         main_layout.addWidget(header)
         
-        # ============================================================
-        # ВКЛАДКИ
-        # ============================================================
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
         
@@ -458,21 +447,18 @@ def main():
                 return
             stand_cards[name].update_status("connecting", False)
             QApplication.processEvents()
-            
             ok, msg = bc.connect(name)
-            
             if ok:
                 QMessageBox.information(window, "Успех", msg)
             else:
                 QMessageBox.critical(window, "Ошибка подключения", msg)
-            
             update_cards()
         
         def disconnect_stand(name):
             bc.disconnect(name)
             update_cards()
         
-        # ---- ВКЛАДКА 1: СТЕНДЫ ----
+        # Вкладка СТЕНДЫ
         stands_tab = QWidget()
         stands_layout = QVBoxLayout(stands_tab)
         stands_layout.setAlignment(Qt.AlignCenter)
@@ -497,25 +483,19 @@ def main():
         refresh_btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
         refresh_btn.clicked.connect(update_cards)
         stands_layout.addWidget(refresh_btn, alignment=Qt.AlignCenter)
-        
         tabs.addTab(stands_tab, "СТЕНДЫ")
         
-        # ---- ВКЛАДКА 2: ORANGEPI ----
+        # Вкладка ORANGEPI
         orange_tab = QWidget()
         orange_layout = QVBoxLayout(orange_tab)
         orange_layout.setAlignment(Qt.AlignCenter)
-        
-        orange_title = QLabel("OrangePi")
-        orange_title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
-        orange_title.setAlignment(Qt.AlignCenter)
-        orange_layout.addWidget(orange_title)
+        orange_layout.addWidget(QLabel("OrangePi", alignment=Qt.AlignCenter, styleSheet="color: #a0b0ff; font-size: 18px; font-weight: bold;"))
         
         op_info = bc.stands["OrangePi"]
         op_card = StandCard("OrangePi", op_info.ip, op_info.username, op_info.stand_type)
         op_card.connect_btn.clicked.connect(lambda: connect_stand("OrangePi"))
         op_card.disconnect_btn.clicked.connect(lambda: disconnect_stand("OrangePi"))
         stand_cards["OrangePi"] = op_card
-        
         orange_layout.addWidget(op_card, alignment=Qt.AlignCenter)
         orange_layout.addStretch()
         
@@ -524,10 +504,9 @@ def main():
         refresh_op_btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
         refresh_op_btn.clicked.connect(update_cards)
         orange_layout.addWidget(refresh_op_btn, alignment=Qt.AlignCenter)
-        
         tabs.addTab(orange_tab, "ORANGEPI")
         
-        # ---- ВКЛАДКА 3: ФАЙЛЫ СТЕНДОВ ----
+        # Вкладка ФАЙЛЫ СТЕНДОВ
         files_tab = QWidget()
         files_layout = QVBoxLayout(files_tab)
         
@@ -607,10 +586,9 @@ def main():
         files_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_stand, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
         files_btn_row.addStretch()
         files_layout.addLayout(files_btn_row)
-        
         tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
         
-        # ---- ВКЛАДКА 4: ФАЙЛЫ ORANGEPI ----
+        # Вкладка ФАЙЛЫ ORANGEPI
         op_files_tab = QWidget()
         op_files_layout = QVBoxLayout(op_files_tab)
         
@@ -679,17 +657,12 @@ def main():
         op_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_op, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
         op_btn_row.addStretch()
         op_files_layout.addLayout(op_btn_row)
-        
         tabs.addTab(op_files_tab, "ФАЙЛЫ ORANGEPI")
         
-        # ---- ВКЛАДКА 5: ПРОЦЕССЫ ----
+        # Вкладка ПРОЦЕССЫ
         proc_tab = QWidget()
         proc_layout = QVBoxLayout(proc_tab)
-        
-        proc_title = QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ")
-        proc_title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
-        proc_title.setAlignment(Qt.AlignCenter)
-        proc_layout.addWidget(proc_title)
+        proc_layout.addWidget(QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ", alignment=Qt.AlignCenter, styleSheet="color: #a0b0ff; font-size: 18px; font-weight: bold;"))
         
         sel_row = QHBoxLayout()
         sel_row.addStretch()
@@ -738,10 +711,9 @@ def main():
         act_row.addStretch()
         proc_layout.addLayout(act_row)
         proc_layout.addStretch()
-        
         tabs.addTab(proc_tab, "ПРОЦЕССЫ")
         
-        # ---- ВКЛАДКА 6: ЛОГИ ----
+        # Вкладка ЛОГИ
         log_tab = QWidget()
         log_layout = QVBoxLayout(log_tab)
         log_text = QTextEdit()
@@ -751,7 +723,6 @@ def main():
         log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: log_text.clear()))
         tabs.addTab(log_tab, "ЛОГИ")
         
-        # Таймеры
         timer = QTimer()
         timer.timeout.connect(update_cards)
         timer.start(3000)
