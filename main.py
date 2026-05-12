@@ -25,7 +25,6 @@ else:
 
 IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
 
-# Путь к plink.exe
 PLINK_PATH = None
 if getattr(sys, 'frozen', False):
     plink_candidate = os.path.join(sys._MEIPASS, "plink.exe")
@@ -104,67 +103,51 @@ class BenchConnector:
         """Выполняет SSH команду. Для старых стендов использует plink.exe."""
         info = self.stands[name]
         
-        # Для старых стендов с plink
         if name in self.STANDS and PLINK_PATH:
-            # plink сначала сохраняет ключ в реестр, потом выполняет команду
-            # -batch отключает интерактивные запросы
             if tty:
                 cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -batch -t {info.username}@{info.ip} "{remote_cmd}"'
             else:
                 cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -batch {info.username}@{info.ip} "{remote_cmd}"'
         else:
             opts = self.NORMAL_SSH_OPTS
-            if tty: opts = "-tt " + opts
+            if tty:
+                opts = "-tt " + opts
             cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
         
         try:
             return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            # Создаём объект с ошибкой таймаута
-            result = subprocess.CompletedProcess(cmd, -1, "", "Таймаут подключения")
-            return result
+            return subprocess.CompletedProcess(cmd, -1, "", "Таймаут подключения")
         except Exception as e:
-            result = subprocess.CompletedProcess(cmd, -1, "", str(e))
-            return result)
+            return subprocess.CompletedProcess(cmd, -1, "", str(e))
 
     def connect(self, name, password=None):
-        """Подключение к стенду. Возвращает (успех, сообщение)."""
         if name not in self.stands: 
             return False, f"Стенд {name} не найден"
-        
         info = self.stands[name]
         if password is None: 
             password = info.password
-        
         if not password:
             return False, f"Нет пароля для стенда {name}"
-        
         if name in self.STANDS:
             return self._connect_with_su(name, info, password)
         else:
             return self._connect_simple(name, info, password)
     
     def _connect_simple(self, name, info, password):
-        """Обычное SSH подключение (OrangePi)"""
         try:
             result = self._ssh_cmd(name, "echo OK", tty=False, timeout=10)
-            
             if 'OK' in result.stdout:
                 info.connected = True
                 return True, f"Подключен к {name}"
-            
             return False, f"Не удалось подключиться.\n\nОтвет:\n{result.stdout.strip()[-200:]}\n\nSTDERR:\n{result.stderr.strip()[-200:]}"
-        except subprocess.TimeoutExpired:
-            return False, "Таймаут подключения (10 секунд)"
         except Exception as e:
             return False, f"Ошибка: {e}"
     
     def _connect_with_su(self, name, info, password):
-        """SSH → su → qconn (через plink для старых стендов)"""
         try:
             remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
             result = self._ssh_cmd(name, remote_cmd, tty=True, timeout=20)
-            
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
             
@@ -172,24 +155,15 @@ class BenchConnector:
                 info.connected = True
                 return True, f"Подключен к {name}\n(su + qconn выполнены)"
             
-            error_msg = f"Не удалось подключиться к {name}.\n\n"
-            error_msg += f"Хост: {info.username}@{info.ip}\n\n"
-            
+            error_msg = f"Не удалось подключиться к {name}.\n\nХост: {info.username}@{info.ip}\n\n"
             if 'FAIL' in stdout:
                 error_msg += "Пароль SSH принят, но su или qconn не сработали."
             elif 'Permission denied' in stdout or 'Permission denied' in stderr:
                 error_msg += "Неверный логин или пароль SSH."
-            elif 'Connection refused' in stderr:
-                error_msg += "SSH-соединение отклонено (порт 22)."
             else:
                 if stdout: error_msg += f"Ответ сервера:\n{stdout[-400:]}"
                 if stderr: error_msg += f"\n\nSTDERR:\n{stderr[-400:]}"
-                if not stdout and not stderr: error_msg += "Сервер не вернул ответ."
-            
             return False, error_msg
-                
-        except subprocess.TimeoutExpired:
-            return False, f"Таймаут подключения к {name} (20 секунд)."
         except Exception as e:
             return False, f"Ошибка: {type(e).__name__}: {e}"
     
@@ -198,17 +172,14 @@ class BenchConnector:
             self.stands[name].connected = False
     
     def execute(self, name, command, timeout=30):
-        """Выполнение команды через su"""
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
         pwd = info.password
-        
         if name in self.STANDS:
             full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
         else:
             full_cmd = command
-        
         try:
             result = self._ssh_cmd(name, full_cmd, tty=True, timeout=timeout)
             return result.returncode == 0, result.stdout, result.stderr
@@ -250,9 +221,6 @@ def main():
         bc.stop_monitoring()
         return
     
-    # ============================================================
-    # GUI
-    # ============================================================
     try:
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
@@ -293,57 +261,46 @@ def main():
                 self.stand_name = name
                 self.setFixedSize(340, 520)
                 self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 15px; }")
-                
                 layout = QVBoxLayout(self)
                 layout.setSpacing(8)
                 layout.setContentsMargins(15, 15, 15, 15)
-                
                 img_name = STAND_IMAGES.get(name, "logo.png")
                 img_label = QLabel()
                 img_label.setPixmap(load_pixmap(img_name, 280, 180))
                 img_label.setAlignment(Qt.AlignCenter)
                 img_label.setStyleSheet("background: transparent; border: none;")
                 layout.addWidget(img_label)
-                
                 name_lbl = QLabel(name)
                 name_lbl.setStyleSheet("color: #cdd6f4; font-size: 20px; font-weight: bold; background: transparent;")
                 name_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(name_lbl)
-                
                 ip_lbl = QLabel(f"{username}@{ip}")
                 ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 12px; background: transparent;")
                 ip_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(ip_lbl)
-                
                 if stand_type:
                     type_lbl = QLabel(stand_type)
                     type_lbl.setStyleSheet("color: #6a6aaa; font-size: 10px; background: transparent;")
                     type_lbl.setAlignment(Qt.AlignCenter)
                     layout.addWidget(type_lbl)
-                
                 self.status_lbl = QLabel("OFFLINE")
                 self.status_lbl.setStyleSheet("color: #f44336; font-size: 14px; font-weight: bold; background: transparent;")
                 self.status_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.status_lbl)
-                
                 self.indicator = QLabel("●")
                 self.indicator.setStyleSheet("color: #f44336; font-size: 16px; background: transparent;")
                 self.indicator.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.indicator)
-                
                 layout.addSpacing(10)
-                
                 self.connect_btn = QPushButton("ПОДКЛЮЧИТЬ")
                 self.connect_btn.setMinimumHeight(35)
                 self.connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #66bb6a; }")
                 layout.addWidget(self.connect_btn)
-                
                 self.disconnect_btn = QPushButton("ОТКЛЮЧИТЬ")
                 self.disconnect_btn.setMinimumHeight(35)
                 self.disconnect_btn.setStyleSheet("QPushButton { background-color: #d24a4a; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #e25a5a; }")
                 self.disconnect_btn.setEnabled(False)
                 layout.addWidget(self.disconnect_btn)
-                
                 layout.addStretch()
             
             def update_status(self, status, connected):
@@ -383,20 +340,17 @@ def main():
         window = QMainWindow()
         window.setWindowTitle("Bench Manager Pro")
         window.setGeometry(50, 30, 1300, 850)
-        
         central = QWidget()
         window.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # Header
         header = QFrame()
         header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
         header.setFixedHeight(80)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(25, 10, 25, 10)
-        
         logo_header = QLabel()
         lp = load_logo(260, 65)
         if lp:
@@ -408,12 +362,10 @@ def main():
         logo_header.setStyleSheet("background: transparent;")
         header_layout.addWidget(logo_header)
         header_layout.addStretch()
-        
         title_lbl = QLabel("BENCH MANAGER PRO")
         title_lbl.setStyleSheet("color: #1a1a4a; font-size: 24px; font-weight: bold; background: transparent; letter-spacing: 4px;")
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
-        
         self_status = QLabel("ЗАГРУЗКА...")
         self_status.setStyleSheet("color: #666; font-size: 13px; font-weight: bold; background: transparent;")
         header_layout.addWidget(self_status)
@@ -421,7 +373,6 @@ def main():
         
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
-        
         stand_cards = {}
         main_stands = ["ГОЗ", "Арктика", "C1M"]
         
