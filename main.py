@@ -100,38 +100,49 @@ class BenchConnector:
     def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=15):
         info = self.stands[name]
         opts = self.OLD_SSH_OPTS if name in self.STANDS else self.NORMAL_SSH_OPTS
-        if use_tty: opts = "-tt " + opts
+        if use_tty:
+            opts = "-tt " + opts
         cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-            return r.returncode, r.stdout or "", r.stderr or ""
+            out = r.stdout if r.stdout else ""
+            err = r.stderr if r.stderr else ""
+            return r.returncode, out, err
         except subprocess.TimeoutExpired:
             return -1, "", "Таймаут подключения"
         except Exception as e:
             return -1, "", str(e)
 
     def connect(self, name, password=None):
-        if name not in self.stands: 
-            return False, f"Стенд {name} не найден"
-        info = self.stands[name]
-        if password is None: password = info.password
-        if not password: return False, f"Нет пароля для стенда {name}"
-        
-        if name in self.STANDS:
-            remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-            code, stdout, stderr = self._ssh_command(name, remote_cmd, use_tty=True, timeout=20)
-            if 'OK' in stdout:
-                info.connected = True
-                return True, f"Подключен к {name}\n(su + qconn выполнены)"
-            if 'FAIL' in stdout:
-                return False, "Пароль SSH принят, но su или qconn не сработали."
-            return False, f"Ошибка подключения.\n\n{stdout[-200:]}\n\n{stderr[-200:]}"
-        else:
-            code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10)
-            if 'OK' in stdout:
-                info.connected = True
-                return True, f"Подключен к {name}"
-            return False, f"Ошибка:\n{stdout[-200:]}"
+        try:
+            if name not in self.stands:
+                return False, f"Стенд {name} не найден"
+            info = self.stands[name]
+            if password is None:
+                password = info.password
+            if not password:
+                return False, f"Нет пароля для стенда {name}"
+            
+            if name in self.STANDS:
+                remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
+                code, stdout, stderr = self._ssh_command(name, remote_cmd, use_tty=True, timeout=20)
+                
+                if 'OK' in stdout:
+                    info.connected = True
+                    return True, f"Подключен к {name}\n(su + qconn выполнены)"
+                if 'FAIL' in stdout:
+                    return False, "Пароль SSH принят, но su или qconn не сработали."
+                if 'Permission denied' in stdout:
+                    return False, "Неверный логин или пароль."
+                return False, f"Ошибка подключения.\n\n{stdout[-300:]}\n\n{stderr[-300:]}"
+            else:
+                code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10)
+                if 'OK' in stdout:
+                    info.connected = True
+                    return True, f"Подключен к {name}"
+                return False, f"Ошибка подключения.\n{stdout[-300:]}"
+        except Exception as e:
+            return False, f"Критическая ошибка: {str(e)}"
     
     def disconnect(self, name):
         if name in self.stands:
@@ -268,8 +279,6 @@ def main():
                     self.status_lbl.setText("ONLINE")
                     self.status_lbl.setStyleSheet("color: #4caf50; font-size: 14px; font-weight: bold; background: transparent;")
                     self.indicator.setStyleSheet("color: #4caf50; font-size: 16px; background: transparent;")
-                    border = "#4caf50" if connected else "#ff9800"
-                    self.setStyleSheet(f"QFrame {{ background-color: #252545; border: 3px solid {border}; border-radius: 15px; }}")
                     self.connect_btn.setEnabled(not connected)
                     self.disconnect_btn.setEnabled(connected)
                 elif status == "connecting":
@@ -280,11 +289,9 @@ def main():
                     self.status_lbl.setText("OFFLINE")
                     self.status_lbl.setStyleSheet("color: #f44336; font-size: 14px; font-weight: bold; background: transparent;")
                     self.indicator.setStyleSheet("color: #f44336; font-size: 16px; background: transparent;")
-                    self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 15px; }")
                     self.connect_btn.setEnabled(status == "online")
                     self.disconnect_btn.setEnabled(False)
         
-        # Класс окна с сигналом для фонового подключения
         class MainWindow(QMainWindow):
             connect_result = pyqtSignal(str, bool, str)
             
@@ -354,8 +361,7 @@ def main():
         def update_cards():
             for name, card in stand_cards.items():
                 if name in bc.stands:
-                    info = bc.stands[name]
-                    card.update_status(info.status, info.connected)
+                    card.update_status(bc.stands[name].status, bc.stands[name].connected)
             online = sum(1 for s in bc.stands.values() if s.status == "online")
             connected = sum(1 for s in bc.stands.values() if s.connected)
             self_status.setText(f"ONLINE: {online}/4 | CONNECTED: {connected}")
@@ -369,7 +375,10 @@ def main():
             QApplication.processEvents()
             
             def do_connect():
-                ok, msg = bc.connect(name)
+                try:
+                    ok, msg = bc.connect(name)
+                except Exception as e:
+                    ok, msg = False, f"Критическая ошибка: {str(e)}"
                 window.connect_result.emit(name, ok, msg)
             
             threading.Thread(target=do_connect, daemon=True).start()
@@ -396,7 +405,6 @@ def main():
         stands_layout.addWidget(cards_widget, alignment=Qt.AlignCenter)
         refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
         refresh_btn.setMaximumWidth(220)
-        refresh_btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
         refresh_btn.clicked.connect(update_cards)
         stands_layout.addWidget(refresh_btn, alignment=Qt.AlignCenter)
         tabs.addTab(stands_tab, "СТЕНДЫ")
@@ -491,7 +499,7 @@ def main():
         op_sel.addWidget(QLabel("Путь:")); op_path = QLineEdit("/"); op_path.setMinimumWidth(350); op_sel.addWidget(op_path)
         op_sel.addStretch(); op_layout.addLayout(op_sel)
         op_tree = QTreeWidget(); op_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-        op_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
+        op_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; }")
         op_layout.addWidget(op_tree)
         op_log = QTextEdit(); op_log.setReadOnly(True); op_log.setMaximumHeight(50); op_layout.addWidget(op_log)
         def browse_op():
