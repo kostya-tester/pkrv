@@ -5,11 +5,16 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        node-version: '24'
     
     - uses: actions/setup-python@v5
       with:
