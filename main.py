@@ -1,6 +1,6 @@
 """
 Bench Manager - полностью автономный файл с GUI и картинками.
-Использует plink.exe для старых стендов (ГОЗ/Арктика/C1M).
+Использует paramiko для подключения к старым стендам (ГОЗ/Арктика/C1M).
 """
 
 import sys
@@ -24,17 +24,6 @@ else:
     APP_DIR = BASE_DIR
 
 IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
-
-PLINK_PATH = None
-if getattr(sys, 'frozen', False):
-    plink_candidate = os.path.join(sys._MEIPASS, "plink.exe")
-    if os.path.exists(plink_candidate):
-        PLINK_PATH = plink_candidate
-else:
-    for p in [os.path.join(APP_DIR, "plink.exe"), os.path.join(APP_DIR, "tools", "plink.exe")]:
-        if os.path.exists(p):
-            PLINK_PATH = p
-            break
 
 # ============================================================
 # КОННЕКТОР СТЕНДОВ
@@ -65,6 +54,13 @@ class BenchConnector:
     def __init__(self):
         self.stands = {}
         self.monitoring = False
+        self.ssh_clients = {}
+        self.has_paramiko = False
+        try:
+            import paramiko
+            self.has_paramiko = True
+        except ImportError:
+            pass
         self._init_stands()
     
     def _init_stands(self):
@@ -99,40 +95,8 @@ class BenchConnector:
     
     def stop_monitoring(self): self.monitoring = False
 
-    def _ssh_cmd(self, name, remote_cmd, tty=False, timeout=10):
-        """Выполняет SSH команду через plink с передачей 'y' для ключа."""
-        info = self.stands[name]
-        
-        if name in self.STANDS and PLINK_PATH:
-            if tty:
-                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -t {info.username}@{info.ip} "{remote_cmd}"'
-            else:
-                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} {info.username}@{info.ip} "{remote_cmd}"'
-        else:
-            opts = self.NORMAL_SSH_OPTS
-            if tty:
-                opts = "-tt " + opts
-            cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
-        
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                shell=True,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            try:
-                stdout, stderr = proc.communicate(input="y\ny\n", timeout=timeout)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                stdout, stderr = proc.communicate()
-            return subprocess.CompletedProcess(cmd, proc.returncode, stdout or "", stderr or "")
-        except Exception as e:
-            return subprocess.CompletedProcess(cmd, -1, "", str(e))
-
     def connect(self, name, password=None):
+        """Подключение к стенду."""
         if name not in self.stands: 
             return False, f"Стенд {name} не найден"
         info = self.stands[name]
@@ -140,62 +104,117 @@ class BenchConnector:
             password = info.password
         if not password:
             return False, f"Нет пароля для стенда {name}"
-        if name in self.STANDS:
-            return self._connect_with_su(name, info, password)
+        
+        if self.has_paramiko:
+            if name in self.STANDS:
+                return self._connect_paramiko_su(name, info, password)
+            else:
+                return self._connect_paramiko(name, info, password)
         else:
-            return self._connect_simple(name, info, password)
+            return self._connect_subprocess(name, info, password)
     
-    def _connect_simple(self, name, info, password):
+    def _connect_paramiko(self, name, info, password):
+        """Подключение через paramiko (OrangePi)"""
+        import paramiko
         try:
-            result = self._ssh_cmd(name, "echo OK", tty=False, timeout=10)
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(info.ip, username=info.username, password=password, timeout=10, look_for_keys=False, allow_agent=False)
+            self.ssh_clients[name] = ssh
+            info.connected = True
+            return True, f"Подключен к {name}"
+        except paramiko.AuthenticationException:
+            return False, "Неверный логин или пароль"
+        except Exception as e:
+            return False, f"Ошибка подключения: {e}"
+    
+    def _connect_paramiko_su(self, name, info, password):
+        """Подключение через paramiko + su + qconn"""
+        import paramiko
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(info.ip, username=info.username, password=password, timeout=10, look_for_keys=False, allow_agent=False)
+            
+            # Выполняем su и qconn
+            channel = ssh.invoke_shell()
+            time.sleep(0.5)
+            channel.recv(4096)
+            
+            channel.send(f"su\n")
+            time.sleep(0.5)
+            channel.send(f"{password}\n")
+            time.sleep(0.5)
+            channel.send("qconn\n")
+            time.sleep(0.5)
+            channel.send("ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL\n")
+            time.sleep(1)
+            
+            output = channel.recv(4096).decode('utf-8', errors='ignore')
+            channel.close()
+            
+            if 'OK' in output:
+                self.ssh_clients[name] = ssh
+                info.connected = True
+                return True, f"Подключен к {name}\n(su + qconn выполнены)"
+            else:
+                ssh.close()
+                return False, f"su или qconn не сработали.\nОтвет: {output[-300:]}"
+                
+        except paramiko.AuthenticationException:
+            return False, "Неверный логин или пароль SSH"
+        except Exception as e:
+            return False, f"Ошибка подключения: {e}"
+    
+    def _connect_subprocess(self, name, info, password):
+        """Подключение через subprocess (без paramiko)"""
+        try:
+            cmd = f'ssh {self.NORMAL_SSH_OPTS} {info.username}@{info.ip} "echo OK"'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             if 'OK' in result.stdout:
                 info.connected = True
                 return True, f"Подключен к {name}"
-            return False, f"Не удалось подключиться.\n\n{result.stdout[-200:]}\n\n{result.stderr[-200:]}"
-        except Exception as e:
-            return False, f"Ошибка: {e}"
-    
-    def _connect_with_su(self, name, info, password):
-        try:
-            remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-            result = self._ssh_cmd(name, remote_cmd, tty=True, timeout=25)
-            stdout = result.stdout.strip()
-            stderr = result.stderr.strip()
-            
-            if 'OK' in stdout:
-                info.connected = True
-                return True, f"Подключен к {name}\n(su + qconn выполнены)"
-            
-            msg = f"Не удалось подключиться к {name}.\n\nХост: {info.username}@{info.ip}\n\n"
-            if 'FAIL' in stdout:
-                msg += "su или qconn не сработали."
-            elif 'Permission denied' in stdout or 'Permission denied' in stderr:
-                msg += "Неверный логин или пароль."
-            else:
-                if stdout: msg += f"Ответ: {stdout[-400:]}"
-                if stderr: msg += f"\nSTDERR: {stderr[-400:]}"
-            return False, msg
+            return False, f"Не удалось подключиться.\n{result.stdout[-200:]}\n{result.stderr[-200:]}"
         except Exception as e:
             return False, f"Ошибка: {e}"
     
     def disconnect(self, name):
+        if name in self.ssh_clients:
+            try:
+                self.ssh_clients[name].close()
+            except: pass
+            del self.ssh_clients[name]
         if name in self.stands:
             self.stands[name].connected = False
     
     def execute(self, name, command, timeout=30):
+        """Выполнение команды на стенде"""
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
-        pwd = info.password
-        if name in self.STANDS:
-            full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
+        
+        if name in self.ssh_clients and self.has_paramiko:
+            try:
+                if name in self.STANDS:
+                    full_cmd = f"echo '{info.password}' | su -c 'qconn && {command}'"
+                else:
+                    full_cmd = command
+                stdin, stdout, stderr = self.ssh_clients[name].exec_command(full_cmd, timeout=timeout)
+                return True, stdout.read().decode('utf-8', errors='ignore'), stderr.read().decode('utf-8', errors='ignore')
+            except Exception as e:
+                return False, "", str(e)
         else:
-            full_cmd = command
-        try:
-            result = self._ssh_cmd(name, full_cmd, tty=True, timeout=timeout)
-            return result.returncode == 0, result.stdout, result.stderr
-        except:
-            return False, "", "Ошибка выполнения"
+            pwd = info.password
+            if name in self.STANDS:
+                full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
+            else:
+                full_cmd = command
+            cmd = f'ssh -tt {self.NORMAL_SSH_OPTS} {info.username}@{info.ip} "{full_cmd}"'
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+                return r.returncode == 0, r.stdout, r.stderr
+            except:
+                return False, "", "Ошибка выполнения"
     
     def get_all_info(self):
         return {name: {"name": s.name, "ip": s.ip, "username": s.username,
