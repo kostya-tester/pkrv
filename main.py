@@ -235,8 +235,8 @@ def main():
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
-            QLineEdit, QMessageBox, QFrame, QGridLayout, QScrollArea,
-            QTreeWidget, QTreeWidgetItem
+            QLineEdit, QMessageBox, QFrame, QScrollArea,
+            QTreeWidget, QTreeWidgetItem, QSizePolicy
         )
         from PyQt5.QtCore import Qt, QTimer
         from PyQt5.QtGui import QPixmap, QIcon, QColor
@@ -250,7 +250,7 @@ def main():
             "C1M": "c1m.png", "OrangePi": "orangepi.png"
         }
         
-        def load_pixmap(name, width=300, height=200):
+        def load_pixmap(name, width=280, height=180):
             paths = [
                 os.path.join(IMAGES_DIR, name),
                 os.path.join(BASE_DIR, "gui", "images", name),
@@ -264,7 +264,8 @@ def main():
             pix.fill(QColor("#2a2a4a"))
             return pix
         
-        def load_logo(width=200, height=60):
+        def load_logo(width=240, height=70):
+            """Загружает логотип с сохранением пропорций и качества"""
             paths = [os.path.join(IMAGES_DIR, "logo.png"), os.path.join(BASE_DIR, "gui", "images", "logo.png")]
             for p in paths:
                 if os.path.exists(p):
@@ -281,8 +282,7 @@ def main():
             def __init__(self, name, ip, username, stand_type):
                 super().__init__()
                 self.stand_name = name
-                self.setMinimumSize(340, 520)
-                self.setMaximumSize(420, 580)
+                self.setFixedSize(340, 520)
                 self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 15px; }")
                 
                 layout = QVBoxLayout(self)
@@ -291,7 +291,7 @@ def main():
                 
                 img_name = STAND_IMAGES.get(name, "logo.png")
                 img_label = QLabel()
-                img_label.setPixmap(load_pixmap(img_name, 300, 200))
+                img_label.setPixmap(load_pixmap(img_name, 280, 180))
                 img_label.setAlignment(Qt.AlignCenter)
                 img_label.setStyleSheet("background: transparent; border: none;")
                 layout.addWidget(img_label)
@@ -363,13 +363,9 @@ def main():
         # ============================================================
         
         def create_file_browser(placeholder_path="/home/pkrv/CVS", stand_filter=None):
-            """Создаёт виджет просмотра файлов.
-            stand_filter: None = все стенды, список = только указанные
-            """
             widget = QWidget()
             layout = QVBoxLayout(widget)
             
-            # Выбор стенда
             sel_row = QHBoxLayout()
             sel_row.addStretch()
             sel_row.addWidget(QLabel("Стенд:"))
@@ -387,7 +383,6 @@ def main():
             sel_row.addStretch()
             layout.addLayout(sel_row)
             
-            # Быстрые кнопки папок (только для основных стендов)
             if stand_filter:
                 quick_row = QHBoxLayout()
                 quick_row.addStretch()
@@ -403,13 +398,11 @@ def main():
                 quick_row.addStretch()
                 layout.addLayout(quick_row)
             
-            # Дерево файлов
             tree = QTreeWidget()
             tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
             tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
             layout.addWidget(tree)
             
-            # Лог
             log_edit = QTextEdit()
             log_edit.setReadOnly(True)
             log_edit.setMaximumHeight(50)
@@ -488,29 +481,34 @@ def main():
         main_layout.setContentsMargins(15, 15, 15, 15)
         
         # ============================================================
-        # HEADER
+        # HEADER (БЕЛЫЙ) - ЛОГОТИП БЕЗ ИСКАЖЕНИЙ
         # ============================================================
         header = QFrame()
         header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
-        header.setFixedHeight(70)
+        header.setFixedHeight(80)
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(20, 10, 20, 10)
+        header_layout.setContentsMargins(25, 10, 25, 10)
         
         logo_header = QLabel()
-        lp = load_logo(200, 55)
-        if lp: logo_header.setPixmap(lp)
-        else: logo_header.setText("BENCH MANAGER")
+        lp = load_logo(260, 65)  # Увеличенный логотип
+        if lp:
+            logo_header.setPixmap(lp)
+            logo_header.setFixedSize(260, 65)
+        else:
+            logo_header.setText("BENCH MANAGER")
+            logo_header.setStyleSheet("color: #1a1a4a; font-size: 22px; font-weight: bold; background: transparent;")
         logo_header.setStyleSheet("background: transparent;")
+        logo_header.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(logo_header)
         header_layout.addStretch()
         
         title_lbl = QLabel("BENCH MANAGER PRO")
-        title_lbl.setStyleSheet("color: #1a1a4a; font-size: 22px; font-weight: bold; background: transparent; letter-spacing: 3px;")
+        title_lbl.setStyleSheet("color: #1a1a4a; font-size: 24px; font-weight: bold; background: transparent; letter-spacing: 4px;")
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
         
         self_status = QLabel("ЗАГРУЗКА...")
-        self_status.setStyleSheet("color: #666; font-size: 12px; font-weight: bold; background: transparent;")
+        self_status.setStyleSheet("color: #666; font-size: 13px; font-weight: bold; background: transparent;")
         header_layout.addWidget(self_status)
         
         main_layout.addWidget(header)
@@ -550,30 +548,25 @@ def main():
             bc.disconnect(name)
             update_cards()
         
-        # ---- ВКЛАДКА 1: СТЕНДЫ (ГОЗ, Арктика, C1M) ----
+        # ---- ВКЛАДКА 1: СТЕНДЫ (по центру) ----
         stands_tab = QWidget()
         stands_layout = QVBoxLayout(stands_tab)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        stands_layout.setAlignment(Qt.AlignCenter)
         
         cards_widget = QWidget()
-        cards_grid = QHBoxLayout(cards_widget)
-        cards_grid.setSpacing(20)
-        cards_grid.setContentsMargins(10, 10, 10, 10)
+        cards_layout = QHBoxLayout(cards_widget)
+        cards_layout.setSpacing(25)
+        cards_layout.setAlignment(Qt.AlignCenter)
         
         for name in main_stands:
             info = bc.stands[name]
             card = StandCard(name, info.ip, info.username, info.stand_type)
-            cards_grid.addWidget(card)
+            cards_layout.addWidget(card)
             stand_cards[name] = card
             card.connect_btn.clicked.connect(lambda checked, n=name: connect_stand(n))
             card.disconnect_btn.clicked.connect(lambda checked, n=name: disconnect_stand(n))
         
-        cards_grid.addStretch()
-        scroll.setWidget(cards_widget)
-        stands_layout.addWidget(scroll)
+        stands_layout.addWidget(cards_widget, alignment=Qt.AlignCenter)
         
         refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
         refresh_btn.setMaximumWidth(220)
@@ -586,6 +579,7 @@ def main():
         # ---- ВКЛАДКА 2: ORANGEPI ----
         orange_tab = QWidget()
         orange_layout = QVBoxLayout(orange_tab)
+        orange_layout.setAlignment(Qt.AlignCenter)
         
         orange_title = QLabel("OrangePi")
         orange_title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
@@ -609,7 +603,7 @@ def main():
         
         tabs.addTab(orange_tab, "ORANGEPI")
         
-        # ---- ВКЛАДКА 3: ФАЙЛЫ СТЕНДОВ (ГОЗ/Арктика/C1M) ----
+        # ---- ВКЛАДКА 3: ФАЙЛЫ СТЕНДОВ ----
         files_tab = create_file_browser("/home/pkrv/CVS", stand_filter=main_stands)
         tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
         
