@@ -9,7 +9,6 @@ import socket
 import threading
 import subprocess
 import argparse
-from typing import Dict, List, Optional, Tuple, Any, Callable
 from datetime import datetime
 
 # ============================================================
@@ -26,33 +25,6 @@ else:
 IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
 
 # ============================================================
-# ЛОГГЕР
-# ============================================================
-
-class LogManager:
-    def __init__(self):
-        self.log_level = "INFO"
-        self.log_file = None
-    def setup(self, level="INFO", log_file=None):
-        self.log_level = level
-        if log_file:
-            try:
-                os.makedirs(os.path.dirname(log_file), exist_ok=True)
-                self.log_file = log_file
-            except: pass
-    def _write(self, level, msg):
-        text = f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}"
-        print(text)
-        if self.log_file:
-            try:
-                with open(self.log_file, 'a', encoding='utf-8') as f:
-                    f.write(text + '\n')
-            except: pass
-    def info(self, msg): self._write("INFO", msg)
-    def error(self, msg): self._write("ERROR", msg)
-    def warning(self, msg): self._write("WARNING", msg)
-
-# ============================================================
 # КОННЕКТОР СТЕНДОВ
 # ============================================================
 
@@ -66,13 +38,6 @@ class StandInfo:
         self.connected = False
         self.last_check = None
         self.stand_type = stand_type
-    def to_dict(self):
-        return {
-            'name': self.name, 'ip': self.ip, 'username': self.username,
-            'status': self.status, 'connected': self.connected,
-            'type': self.stand_type,
-            'last_check': self.last_check.strftime('%H:%M:%S') if self.last_check else 'Никогда'
-        }
 
 class BenchConnector:
     STANDS = {
@@ -84,7 +49,6 @@ class BenchConnector:
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
     def __init__(self):
-        self.logger = LogManager()
         self.stands = {}
         self.monitoring = False
         self._init_stands()
@@ -118,41 +82,25 @@ class BenchConnector:
                         info.connected = False
                 time.sleep(5)
         threading.Thread(target=loop, daemon=True).start()
-        self.logger.info("Мониторинг запущен")
     
     def stop_monitoring(self): self.monitoring = False
 
     def connect(self, name, password=None):
-        """Подключение к стенду с подробным логированием ошибок"""
+        """Подключение к стенду. Возвращает (успех, сообщение)."""
         if name not in self.stands: 
-            self.logger.error(f"Стенд {name} не найден в конфигурации")
-            return False
+            return False, f"Стенд {name} не найден"
         
         info = self.stands[name]
         if password is None: 
             password = info.password
         
         if not password:
-            self.logger.error(f"Нет пароля для стенда {name}")
-            return False
-        
-        self.logger.info(f"=" * 50)
-        self.logger.info(f"ПОДКЛЮЧЕНИЕ К {name} ({info.username}@{info.ip})")
-        self.logger.info(f"=" * 50)
+            return False, f"Нет пароля для стенда {name}"
         
         if name in self.STANDS:
-            result = self._connect_with_su(name, info, password)
+            return self._connect_with_su(name, info, password)
         else:
-            result = self._connect_simple(name, info, password)
-        
-        if not result:
-            self.logger.error(f"НЕ УДАЛОСЬ ПОДКЛЮЧИТЬСЯ к {name}")
-            self.logger.error(f"Проверьте:")
-            self.logger.error(f"  1. Стенд доступен по SSH: ssh {info.username}@{info.ip}")
-            self.logger.error(f"  2. Пароль правильный: {password}")
-            self.logger.error(f"  3. Команда su работает на стенде")
-        
-        return result
+            return self._connect_simple(name, info, password)
     
     def _connect_simple(self, name, info, password):
         """Обычное SSH подключение (OrangePi)"""
@@ -162,32 +110,21 @@ class BenchConnector:
             else:
                 cmd = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} 'echo OK'"
             
-            self.logger.info(f"Выполняю: {cmd}")
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-            
-            self.logger.info(f"Код возврата: {result.returncode}")
-            self.logger.info(f"STDOUT: {result.stdout.strip()}")
-            if result.stderr.strip():
-                self.logger.info(f"STDERR: {result.stderr.strip()}")
             
             if 'OK' in result.stdout:
                 info.connected = True
-                self.logger.info(f"✓ Подключен к {name}")
-                return True
+                return True, f"Подключен к {name}"
             
-            self.logger.error(f"✗ Не подключен. Ответ: {result.stdout.strip()}")
-            return False
+            return False, f"Не удалось подключиться.\nОтвет: {result.stdout.strip()[-200:]}\nОшибка: {result.stderr.strip()[-200:]}"
         except subprocess.TimeoutExpired:
-            self.logger.error(f"✗ Таймаут подключения к {name} (10 секунд)")
-            return False
+            return False, "Таймаут подключения (10 секунд)"
         except Exception as e:
-            self.logger.error(f"✗ Ошибка: {e}")
-            return False
+            return False, f"Ошибка: {e}"
     
     def _connect_with_su(self, name, info, password):
-        """SSH → su → qconn для ГОЗ/Арктика/C1M с детальным логом"""
+        """SSH → su → qconn. Возвращает (успех, сообщение_с_диагностикой)."""
         try:
-            # Команда внутри стенда: передаём пароль в su, выполняем qconn, проверяем папку
             remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
             
             if os.name == 'nt':
@@ -195,76 +132,56 @@ class BenchConnector:
             else:
                 cmd = f"sshpass -p '{password}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 {info.username}@{info.ip} '{remote_cmd}'"
             
-            self.logger.info(f"Команда SSH: ssh {info.username}@{info.ip}")
-            self.logger.info(f"Удалённая команда: echo *** | su -c 'qconn && ls /home/pkrv/CVS && echo OK'")
-            self.logger.info(f"Ожидание ответа (таймаут 20с)...")
-            
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20)
             
-            # Подробный вывод для отладки
-            self.logger.info(f"Код возврата: {result.returncode}")
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
             
-            stdout_preview = result.stdout.strip()
-            stderr_preview = result.stderr.strip()
-            
-            if stdout_preview:
-                self.logger.info(f"STDOUT (последние 300 символов):")
-                self.logger.info(stdout_preview[-300:])
-            else:
-                self.logger.info(f"STDOUT: (пусто)")
-            
-            if stderr_preview:
-                self.logger.info(f"STDERR:")
-                self.logger.info(stderr_preview[-300:])
-            
-            # Анализируем ответ
-            if 'OK' in result.stdout:
+            # Успех
+            if 'OK' in stdout:
                 info.connected = True
-                self.logger.info(f"✓ Подключен к {name} (su + qconn выполнены успешно)")
-                return True
-            elif 'FAIL' in result.stdout:
-                self.logger.error(f"✗ su или qconn не сработали. Ответ: {stdout_preview[-200:]}")
-                return False
-            elif 'Permission denied' in result.stdout or 'Permission denied' in result.stderr:
-                self.logger.error(f"✗ Ошибка доступа. Неверный пароль?")
-                return False
-            elif 'Connection refused' in result.stderr:
-                self.logger.error(f"✗ SSH-соединение отклонено. Порт 22 закрыт?")
-                return False
-            elif 'Connection timed out' in result.stderr or 'timed out' in stdout_preview:
-                self.logger.error(f"✗ Таймаут соединения. Стенд не отвечает.")
-                return False
-            elif 'No route to host' in result.stderr:
-                self.logger.error(f"✗ Нет маршрута до стенда. Проверьте сеть.")
-                return False
-            elif 'Host key verification failed' in result.stderr:
-                self.logger.error(f"✗ Ключ хоста не совпадает.")
-                return False
+                return True, f"Подключен к {name}\n(su + qconn выполнены)"
+            
+            # Анализируем ошибку
+            error_details = []
+            error_details.append(f"Не удалось подключиться к {name}.\n")
+            error_details.append(f"Хост: {info.username}@{info.ip}")
+            error_details.append(f"Пароль: {'***' if password else 'не задан'}")
+            error_details.append("")
+            
+            if 'FAIL' in stdout:
+                error_details.append("ОШИБКА: su или qconn не сработали.")
+                error_details.append("Пароль принят, но команда su/qconn не выполнилась.")
+            elif 'Password:' in stdout or 'password' in stdout.lower():
+                error_details.append("ОШИБКА: SSH запросил пароль интерактивно.")
+                error_details.append("Не удалось передать пароль автоматически.")
+            elif 'Permission denied' in stdout or 'Permission denied' in stderr:
+                error_details.append("ОШИБКА: Неверный логин или пароль SSH.")
+            elif 'Connection refused' in stderr:
+                error_details.append("ОШИБКА: SSH-соединение отклонено.")
+            elif 'timed out' in stdout.lower() or 'timed out' in stderr.lower():
+                error_details.append("ОШИБКА: Таймаут соединения.")
+            elif 'No route to host' in stderr:
+                error_details.append("ОШИБКА: Нет маршрута до стенда.")
             else:
-                self.logger.error(f"✗ Неизвестная ошибка. Полный ответ:")
-                self.logger.error(f"  STDOUT: {stdout_preview}")
-                self.logger.error(f"  STDERR: {stderr_preview}")
-                return False
+                error_details.append(f"Ответ сервера:\n{stdout[-300:] if stdout else '(пусто)'}")
+                if stderr:
+                    error_details.append(f"\nSTDERR:\n{stderr[-200:]}")
+            
+            return False, "\n".join(error_details)
                 
         except subprocess.TimeoutExpired:
-            self.logger.error(f"✗ Таймаут подключения к {name} (20 секунд)")
-            self.logger.error(f"  Стенд не ответил за отведённое время")
-            return False
+            return False, f"Таймаут подключения к {name} (20 секунд).\nСтенд не ответил за отведённое время."
         except FileNotFoundError:
-            self.logger.error(f"✗ Команда ssh не найдена!")
-            self.logger.error(f"  Установите OpenSSH: Добавить компонент → OpenSSH Client")
-            return False
+            return False, "Команда ssh не найдена!\nУстановите OpenSSH Client."
         except Exception as e:
-            self.logger.error(f"✗ Исключение Python: {type(e).__name__}: {e}")
-            return False
+            return False, f"Ошибка Python: {type(e).__name__}: {e}"
     
     def disconnect(self, name):
         if name in self.stands:
             self.stands[name].connected = False
-            self.logger.info(f"Отключен от {name}")
     
     def execute(self, name, command, timeout=30):
-        """Выполнение команды через su"""
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
@@ -283,12 +200,13 @@ class BenchConnector:
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
             return r.returncode == 0, r.stdout, r.stderr
-        except Exception as e:
-            self.logger.error(f"Ошибка выполнения команды: {e}")
-            return False, "", str(e)
+        except:
+            return False, "", "Ошибка выполнения"
     
     def get_all_info(self):
-        return {name: s.to_dict() for name, s in self.stands.items()}
+        return {name: {"name": s.name, "ip": s.ip, "username": s.username,
+                       "status": s.status, "connected": s.connected,
+                       "type": s.stand_type} for name, s in self.stands.items()}
 
 # ============================================================
 # MAIN
@@ -315,9 +233,8 @@ def main():
             print(f"  {name:12} | {info['ip']:16} | {s}")
         if args.console:
             for n in ["ГОЗ", "Арктика", "C1M"]:
-                bc.connect(n)
-            import code
-            code.interact(local={'bc': bc})
+                ok, msg = bc.connect(n)
+                print(f"{n}: {msg}")
         bc.stop_monitoring()
         return
     
@@ -328,8 +245,7 @@ def main():
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
-            QLineEdit, QMessageBox, QFrame, QScrollArea,
-            QTreeWidget, QTreeWidgetItem
+            QLineEdit, QMessageBox, QFrame, QTreeWidget, QTreeWidgetItem
         )
         from PyQt5.QtCore import Qt, QTimer
         from PyQt5.QtGui import QPixmap, QIcon, QColor
@@ -344,10 +260,7 @@ def main():
         }
         
         def load_pixmap(name, width=280, height=180):
-            paths = [
-                os.path.join(IMAGES_DIR, name),
-                os.path.join(BASE_DIR, "gui", "images", name),
-            ]
+            paths = [os.path.join(IMAGES_DIR, name), os.path.join(BASE_DIR, "gui", "images", name)]
             for p in paths:
                 if os.path.exists(p):
                     pix = QPixmap(p)
@@ -451,101 +364,6 @@ def main():
                     self.disconnect_btn.setEnabled(False)
         
         # ============================================================
-        # КОМПОНЕНТ ПРОСМОТРА ФАЙЛОВ
-        # ============================================================
-        
-        def create_file_browser(placeholder_path="/home/pkrv/CVS", stand_filter=None):
-            widget = QWidget()
-            layout = QVBoxLayout(widget)
-            
-            sel_row = QHBoxLayout()
-            sel_row.addStretch()
-            sel_row.addWidget(QLabel("Стенд:"))
-            stand_combo = QComboBox()
-            if stand_filter:
-                stand_combo.addItems(stand_filter)
-            else:
-                stand_combo.addItems(list(bc.STANDS.keys()) + ["OrangePi"])
-            stand_combo.setMinimumWidth(180)
-            sel_row.addWidget(stand_combo)
-            sel_row.addWidget(QLabel("Путь:"))
-            path_edit = QLineEdit(placeholder_path)
-            path_edit.setMinimumWidth(350)
-            sel_row.addWidget(path_edit)
-            sel_row.addStretch()
-            layout.addLayout(sel_row)
-            
-            if stand_filter:
-                quick_row = QHBoxLayout()
-                quick_row.addStretch()
-                for folder_path, folder_label in [
-                    ("/home/pkrv/CVS", "📁 CVS"),
-                    ("/tmp", "📁 /tmp"),
-                    ("/fead_hd", "📁 fead_hd")
-                ]:
-                    btn = QPushButton(folder_label)
-                    btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; background-color: #3a3a6a; } QPushButton:hover { background-color: #5a5a9a; }")
-                    btn.clicked.connect(lambda checked, p=folder_path: (path_edit.setText(p), browse_files()))
-                    quick_row.addWidget(btn)
-                quick_row.addStretch()
-                layout.addLayout(quick_row)
-            
-            tree = QTreeWidget()
-            tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-            tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
-            layout.addWidget(tree)
-            
-            log_edit = QTextEdit()
-            log_edit.setReadOnly(True)
-            log_edit.setMaximumHeight(50)
-            layout.addWidget(log_edit)
-            
-            def browse_files():
-                name = stand_combo.currentText()
-                path = path_edit.text().strip() or "/"
-                if name in bc.stands and bc.stands[name].connected:
-                    tree.clear()
-                    ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
-                    if ok:
-                        for line in out.split('\n'):
-                            if line.startswith('total') or not line.strip(): continue
-                            parts = line.split()
-                            if len(parts) >= 8:
-                                fname = ' '.join(parts[7:])
-                                if fname in ['.', '..']: continue
-                                is_dir = line.startswith('d')
-                                item = QTreeWidgetItem([fname, parts[4] if not is_dir else "", "Папка" if is_dir else "Файл", f"{parts[5]} {parts[6]}" if len(parts)>6 else ""])
-                                if is_dir: item.setForeground(0, QColor("#61dafb"))
-                                tree.addTopLevelItem(item)
-                        log_edit.append(f"[OK] {path}")
-                    else:
-                        log_edit.append(f"[ОШИБКА] {err}")
-                else:
-                    log_edit.append(f"[ОШИБКА] Стенд {name} не подключен")
-            
-            def cd_folder():
-                item = tree.currentItem()
-                if item and item.text(2) == "Папка":
-                    path_edit.setText(f"{path_edit.text().rstrip('/')}/{item.text(0)}")
-                    browse_files()
-            
-            def go_up():
-                cur = path_edit.text().rstrip('/')
-                if cur != '/':
-                    path_edit.setText(os.path.dirname(cur) or '/')
-                    browse_files()
-            
-            btn_row = QHBoxLayout()
-            btn_row.addStretch()
-            btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-            btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_folder, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-            btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=go_up, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-            btn_row.addStretch()
-            layout.addLayout(btn_row)
-            
-            return widget
-        
-        # ============================================================
         # ОКНО
         # ============================================================
         
@@ -573,7 +391,7 @@ def main():
         main_layout.setContentsMargins(15, 15, 15, 15)
         
         # ============================================================
-        # HEADER (БЕЛЫЙ)
+        # HEADER
         # ============================================================
         header = QFrame()
         header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
@@ -590,7 +408,6 @@ def main():
             logo_header.setText("BENCH MANAGER")
             logo_header.setStyleSheet("color: #1a1a4a; font-size: 22px; font-weight: bold; background: transparent;")
         logo_header.setStyleSheet("background: transparent;")
-        logo_header.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(logo_header)
         header_layout.addStretch()
         
@@ -630,17 +447,14 @@ def main():
                 return
             stand_cards[name].update_status("connecting", False)
             QApplication.processEvents()
-            if bc.connect(name):
-                QMessageBox.information(window, "Успех", f"Подключен к {name}\n(выполнено: su + qconn)")
+            
+            ok, msg = bc.connect(name)
+            
+            if ok:
+                QMessageBox.information(window, "Успех", msg)
             else:
-                # Показываем детальную ошибку
-                QMessageBox.critical(window, "Ошибка подключения", 
-                    f"Не удалось подключиться к {name}.\n\n"
-                    f"Проверьте консоль (логи) для деталей.\n"
-                    f"Убедитесь, что:\n"
-                    f"1. Стенд доступен: ssh pkrv@{info.ip}\n"
-                    f"2. Пароль правильный\n"
-                    f"3. Команда su работает на стенде")
+                QMessageBox.critical(window, "Ошибка подключения", msg)
+            
             update_cards()
         
         def disconnect_stand(name):
@@ -702,12 +516,163 @@ def main():
         
         tabs.addTab(orange_tab, "ORANGEPI")
         
-        # ---- ВКЛАДКА 3: ФАЙЛЫ СТЕНДОВ ----
-        files_tab = create_file_browser("/home/pkrv/CVS", stand_filter=main_stands)
+        # ---- ВКЛАДКА 3: ФАЙЛЫ СТЕНДОВ (ГОЗ/Арктика/C1M) ----
+        files_tab = QWidget()
+        files_layout = QVBoxLayout(files_tab)
+        
+        # Выбор стенда и пути
+        files_sel = QHBoxLayout()
+        files_sel.addStretch()
+        files_sel.addWidget(QLabel("Стенд:"))
+        files_stand = QComboBox()
+        files_stand.addItems(main_stands)
+        files_stand.setMinimumWidth(180)
+        files_sel.addWidget(files_stand)
+        files_sel.addWidget(QLabel("Путь:"))
+        files_path = QLineEdit("/home/pkrv/CVS")
+        files_path.setMinimumWidth(350)
+        files_sel.addWidget(files_path)
+        files_sel.addStretch()
+        files_layout.addLayout(files_sel)
+        
+        # Быстрые кнопки папок (только для основных стендов)
+        quick_row = QHBoxLayout()
+        quick_row.addStretch()
+        for path, label in [("/home/pkrv/CVS", "📁 CVS"), ("/tmp", "📁 /tmp"), ("/fead_hd", "📁 fead_hd")]:
+            btn = QPushButton(label)
+            btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; background-color: #3a3a6a; } QPushButton:hover { background-color: #5a5a9a; }")
+            btn.clicked.connect(lambda checked, p=path: (files_path.setText(p), browse_stand_files()))
+            quick_row.addWidget(btn)
+        quick_row.addStretch()
+        files_layout.addLayout(quick_row)
+        
+        # Дерево файлов
+        files_tree = QTreeWidget()
+        files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
+        files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
+        files_layout.addWidget(files_tree)
+        
+        files_log = QTextEdit()
+        files_log.setReadOnly(True)
+        files_log.setMaximumHeight(50)
+        files_layout.addWidget(files_log)
+        
+        def browse_stand_files():
+            name = files_stand.currentText()
+            path = files_path.text().strip() or "/"
+            if name in bc.stands and bc.stands[name].connected:
+                files_tree.clear()
+                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                if ok:
+                    for line in out.split('\n'):
+                        if line.startswith('total') or not line.strip(): continue
+                        parts = line.split()
+                        if len(parts) >= 8:
+                            fname = ' '.join(parts[7:])
+                            if fname in ['.', '..']: continue
+                            is_dir = line.startswith('d')
+                            item = QTreeWidgetItem([fname, parts[4] if not is_dir else "", "Папка" if is_dir else "Файл", f"{parts[5]} {parts[6]}" if len(parts)>6 else ""])
+                            if is_dir: item.setForeground(0, QColor("#61dafb"))
+                            files_tree.addTopLevelItem(item)
+                    files_log.append(f"[OK] {path}")
+                else:
+                    files_log.append(f"[ОШИБКА] {err}")
+            else:
+                files_log.append(f"[ОШИБКА] Стенд {name} не подключен")
+        
+        def cd_stand_folder():
+            item = files_tree.currentItem()
+            if item and item.text(2) == "Папка":
+                files_path.setText(f"{files_path.text().rstrip('/')}/{item.text(0)}")
+                browse_stand_files()
+        
+        def up_stand():
+            cur = files_path.text().rstrip('/')
+            if cur != '/':
+                files_path.setText(os.path.dirname(cur) or '/')
+                browse_stand_files()
+        
+        files_btn_row = QHBoxLayout()
+        files_btn_row.addStretch()
+        files_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_stand_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+        files_btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_stand_folder, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+        files_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_stand, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+        files_btn_row.addStretch()
+        files_layout.addLayout(files_btn_row)
+        
         tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
         
-        # ---- ВКЛАДКА 4: ФАЙЛЫ ORANGEPI ----
-        op_files_tab = create_file_browser("/", stand_filter=["OrangePi"])
+        # ---- ВКЛАДКА 4: ФАЙЛЫ ORANGEPI (без быстрых кнопок) ----
+        op_files_tab = QWidget()
+        op_files_layout = QVBoxLayout(op_files_tab)
+        
+        op_files_sel = QHBoxLayout()
+        op_files_sel.addStretch()
+        op_files_sel.addWidget(QLabel("Стенд:"))
+        op_files_stand = QComboBox()
+        op_files_stand.addItems(["OrangePi"])
+        op_files_stand.setMinimumWidth(180)
+        op_files_sel.addWidget(op_files_stand)
+        op_files_sel.addWidget(QLabel("Путь:"))
+        op_files_path = QLineEdit("/")
+        op_files_path.setMinimumWidth(350)
+        op_files_sel.addWidget(op_files_path)
+        op_files_sel.addStretch()
+        op_files_layout.addLayout(op_files_sel)
+        
+        op_files_tree = QTreeWidget()
+        op_files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
+        op_files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
+        op_files_layout.addWidget(op_files_tree)
+        
+        op_files_log = QTextEdit()
+        op_files_log.setReadOnly(True)
+        op_files_log.setMaximumHeight(50)
+        op_files_layout.addWidget(op_files_log)
+        
+        def browse_op_files():
+            name = op_files_stand.currentText()
+            path = op_files_path.text().strip() or "/"
+            if name in bc.stands and bc.stands[name].connected:
+                op_files_tree.clear()
+                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                if ok:
+                    for line in out.split('\n'):
+                        if line.startswith('total') or not line.strip(): continue
+                        parts = line.split()
+                        if len(parts) >= 8:
+                            fname = ' '.join(parts[7:])
+                            if fname in ['.', '..']: continue
+                            is_dir = line.startswith('d')
+                            item = QTreeWidgetItem([fname, parts[4] if not is_dir else "", "Папка" if is_dir else "Файл", f"{parts[5]} {parts[6]}" if len(parts)>6 else ""])
+                            if is_dir: item.setForeground(0, QColor("#61dafb"))
+                            op_files_tree.addTopLevelItem(item)
+                    op_files_log.append(f"[OK] {path}")
+                else:
+                    op_files_log.append(f"[ОШИБКА] {err}")
+            else:
+                op_files_log.append(f"[ОШИБКА] Стенд {name} не подключен")
+        
+        def cd_op_folder():
+            item = op_files_tree.currentItem()
+            if item and item.text(2) == "Папка":
+                op_files_path.setText(f"{op_files_path.text().rstrip('/')}/{item.text(0)}")
+                browse_op_files()
+        
+        def up_op():
+            cur = op_files_path.text().rstrip('/')
+            if cur != '/':
+                op_files_path.setText(os.path.dirname(cur) or '/')
+                browse_op_files()
+        
+        op_btn_row = QHBoxLayout()
+        op_btn_row.addStretch()
+        op_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_op_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+        op_btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_op_folder, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+        op_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_op, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+        op_btn_row.addStretch()
+        op_files_layout.addLayout(op_btn_row)
+        
         tabs.addTab(op_files_tab, "ФАЙЛЫ ORANGEPI")
         
         # ---- ВКЛАДКА 5: ПРОЦЕССЫ ----
@@ -784,13 +749,13 @@ def main():
         timer.timeout.connect(update_cards)
         timer.start(3000)
         QTimer.singleShot(500, update_cards)
-        QTimer.singleShot(2000, lambda: [bc.connect(n) for n in main_stands if bc.stands[n].status == "online"] or update_cards())
         
         window.show()
         sys.exit(app.exec_())
         
     except ImportError as e:
-        print(f"PyQt5: {e}")
+        print(f"PyQt5 не установлен: {e}")
+        print("Установите: pip install PyQt5")
         bc.stop_monitoring()
         sys.exit(1)
 
