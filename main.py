@@ -75,14 +75,12 @@ class StandInfo:
         }
 
 class BenchConnector:
-    # Основные стенды (ГОЗ, Арктика, C1M) - с su и qconn
     STANDS = {
         "ГОЗ": {"ip": "192.168.243.248", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "need_su": True},
         "Арктика": {"ip": "192.168.243.249", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "need_su": True},
         "C1M": {"ip": "192.168.243.254", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "need_su": True},
     }
     
-    # OrangePi отдельно
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi", "need_su": False}
     
     def __init__(self):
@@ -94,7 +92,6 @@ class BenchConnector:
     def _init_stands(self):
         for name, cfg in self.STANDS.items():
             self.stands[name] = StandInfo(name, cfg['ip'], cfg['username'], cfg.get('password', ''), cfg.get('type', ''))
-        # OrangePi добавляем отдельно
         self.stands["OrangePi"] = StandInfo("OrangePi", self.ORANGEPI['ip'], self.ORANGEPI['username'], 
                                              self.ORANGEPI.get('password', ''), self.ORANGEPI.get('type', ''))
     
@@ -126,7 +123,7 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def connect(self, name, password=None):
-        """Подключение: SSH → su (пароль) → qconn"""
+        """Подключение: SSH → su → qconn для основных стендов"""
         if name not in self.stands: return False
         info = self.stands[name]
         if password is None: password = info.password
@@ -134,21 +131,18 @@ class BenchConnector:
         
         self.logger.info(f"Подключение к {name} ({info.username}@{info.ip})...")
         
-        # Для основных стендов: ssh → su → qconn
         if name in self.STANDS:
             return self._connect_with_su_qconn(name, info, password)
         else:
-            # OrangePi - обычное подключение
             return self._connect_simple(name, info, password)
     
     def _connect_simple(self, name, info, password):
-        """Обычное SSH подключение (для OrangePi)"""
+        """Обычное SSH подключение (OrangePi)"""
         try:
             if os.name == 'nt':
                 cmd = f'echo {password} | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
             else:
                 cmd = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} 'echo OK'"
-            
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             if 'OK' in result.stdout:
                 info.connected = True
@@ -158,19 +152,15 @@ class BenchConnector:
         except: return False
     
     def _connect_with_su_qconn(self, name, info, password):
-        """Подключение с su и qconn для ГОЗ/Арктика/C1M"""
+        """SSH → su (zxcv) → qconn для ГОЗ/Арктика/C1M"""
         try:
-            # Создаем команду: ssh → su → qconn → проверка
-            remote_script = f"""
-su -c 'qconn; ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'
-"""
-            # Экранируем для передачи через ssh
-            escaped_script = remote_script.replace("'", "'\"'\"'")
+            # Используем expect-подобный подход через ssh -tt
+            remote_script = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
             
             if os.name == 'nt':
-                cmd = f'echo {password} | ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "{escaped_script}"'
+                cmd = f'echo {password} | ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "{remote_script}"'
             else:
-                cmd = f"sshpass -p '{password}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} '{escaped_script}'"
+                cmd = f"sshpass -p '{password}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} '{remote_script}'"
             
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
             
@@ -190,24 +180,21 @@ su -c 'qconn; ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'
             self.stands[name].connected = False
     
     def execute(self, name, command, timeout=30):
-        """Выполнение команды на стенде через su"""
+        """Выполнение команды через su"""
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
         pwd = info.password
         
-        # Для основных стендов - через su
         if name in self.STANDS:
-            full_cmd = f"su -c 'qconn; {command}'"
+            full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
         else:
             full_cmd = command
         
-        escaped_cmd = full_cmd.replace("'", "'\"'\"'")
-        
         if os.name == 'nt':
-            cmd = f'echo {pwd} | ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL {info.username}@{info.ip} "{escaped_cmd}"'
+            cmd = f'echo {pwd} | ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL {info.username}@{info.ip} "{full_cmd}"'
         else:
-            cmd = f"sshpass -p '{pwd}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {info.username}@{info.ip} '{escaped_cmd}'"
+            cmd = f"sshpass -p '{pwd}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {info.username}@{info.ip} '{full_cmd}'"
         
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -215,7 +202,6 @@ su -c 'qconn; ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'
         except: return False, "", "Ошибка"
     
     def get_cvs_contents(self, name):
-        """Получает содержимое папки /home/pkrv/CVS"""
         return self.execute(name, "ls -la /home/pkrv/CVS")
     
     def get_all_info(self):
@@ -259,8 +245,8 @@ def main():
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
-            QLineEdit, QGroupBox, QMessageBox,
-            QFrame, QGridLayout, QScrollArea, QTreeWidget, QTreeWidgetItem
+            QLineEdit, QMessageBox, QFrame, QGridLayout, QScrollArea, 
+            QTreeWidget, QTreeWidgetItem
         )
         from PyQt5.QtCore import Qt, QTimer
         from PyQt5.QtGui import QPixmap, QIcon, QColor
@@ -312,7 +298,6 @@ def main():
                 layout = QVBoxLayout(self)
                 layout.setSpacing(5)
                 
-                # Картинка
                 img_name = STAND_IMAGES.get(name, "logo.png")
                 img_label = QLabel()
                 img_label.setPixmap(load_pixmap(img_name, 210, 130))
@@ -320,26 +305,22 @@ def main():
                 img_label.setStyleSheet("background: transparent; border: none;")
                 layout.addWidget(img_label)
                 
-                # Название
                 name_lbl = QLabel(name)
                 name_lbl.setStyleSheet("color: #cdd6f4; font-size: 16px; font-weight: bold; background: transparent;")
                 name_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(name_lbl)
                 
-                # IP
                 ip_lbl = QLabel(f"{username}@{ip}")
                 ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 10px; background: transparent;")
                 ip_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(ip_lbl)
                 
-                # Тип
                 if stand_type:
                     type_lbl = QLabel(stand_type)
                     type_lbl.setStyleSheet("color: #6a6aaa; font-size: 9px; background: transparent;")
                     type_lbl.setAlignment(Qt.AlignCenter)
                     layout.addWidget(type_lbl)
                 
-                # Статус
                 self.status_lbl = QLabel("OFFLINE")
                 self.status_lbl.setStyleSheet("color: #f44336; font-size: 12px; font-weight: bold; background: transparent;")
                 self.status_lbl.setAlignment(Qt.AlignCenter)
@@ -352,7 +333,6 @@ def main():
                 
                 layout.addSpacing(8)
                 
-                # Кнопки подключения/отключения (внутри карточки)
                 self.connect_btn = QPushButton("ПОДКЛЮЧИТЬ")
                 self.connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 10px; padding: 6px; } QPushButton:hover { background-color: #66bb6a; }")
                 layout.addWidget(self.connect_btn)
@@ -432,9 +412,9 @@ def main():
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
         
-        status_indicator = QLabel("ЗАГРУЗКА...")
-        status_indicator.setStyleSheet("color: #666; font-size: 11px; font-weight: bold; background: transparent;")
-        header_layout.addWidget(status_indicator)
+        self_status = QLabel("ЗАГРУЗКА...")
+        self_status.setStyleSheet("color: #666; font-size: 11px; font-weight: bold; background: transparent;")
+        header_layout.addWidget(self_status)
         
         main_layout.addWidget(header)
         
@@ -443,6 +423,36 @@ def main():
         # ============================================================
         tabs = QTabWidget()
         main_layout.addWidget(tabs)
+        
+        stand_cards = {}
+        main_stands = ["ГОЗ", "Арктика", "C1M"]
+        
+        # Общие функции (объявляем ДО использования)
+        def update_cards():
+            for name, card in stand_cards.items():
+                if name in bc.stands:
+                    info = bc.stands[name]
+                    card.update_status(info.status, info.connected)
+            online = sum(1 for s in bc.stands.values() if s.status == "online")
+            connected = sum(1 for s in bc.stands.values() if s.connected)
+            self_status.setText(f"ONLINE: {online}/4 | CONNECTED: {connected}")
+        
+        def connect_stand(name):
+            info = bc.stands[name]
+            if info.status != "online":
+                QMessageBox.warning(window, "Ошибка", f"Стенд {name} не в сети!")
+                return
+            stand_cards[name].update_status("connecting", False)
+            QApplication.processEvents()
+            if bc.connect(name):
+                QMessageBox.information(window, "Успех", f"Подключен к {name}")
+            else:
+                QMessageBox.critical(window, "Ошибка", f"Не удалось подключиться к {name}")
+            update_cards()
+        
+        def disconnect_stand(name):
+            bc.disconnect(name)
+            update_cards()
         
         # ---- ВКЛАДКА 1: СТЕНДЫ (ГОЗ, Арктика, C1M) ----
         stands_tab = QWidget()
@@ -456,26 +466,21 @@ def main():
         cards_grid = QGridLayout(cards_widget)
         cards_grid.setSpacing(15)
         
-        stand_cards = {}
-        main_stands = ["ГОЗ", "Арктика", "C1M"]
-        
         for i, name in enumerate(main_stands):
             info = bc.stands[name]
             card = StandCard(name, info.ip, info.username, info.stand_type)
             cards_grid.addWidget(card, 0, i, Qt.AlignCenter)
             stand_cards[name] = card
-            
-            # Подключаем кнопки
             card.connect_btn.clicked.connect(lambda checked, n=name: connect_stand(n))
             card.disconnect_btn.clicked.connect(lambda checked, n=name: disconnect_stand(n))
         
         scroll.setWidget(cards_widget)
         stands_layout.addWidget(scroll)
         
-        # Маленькая кнопка обновления снизу
         refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
         refresh_btn.setMaximumWidth(200)
         refresh_btn.setStyleSheet("QPushButton { font-size: 10px; padding: 5px 10px; }")
+        refresh_btn.clicked.connect(update_cards)
         stands_layout.addWidget(refresh_btn, alignment=Qt.AlignCenter)
         
         tabs.addTab(stands_tab, "СТЕНДЫ")
@@ -489,7 +494,6 @@ def main():
         orange_title.setAlignment(Qt.AlignCenter)
         orange_layout.addWidget(orange_title)
         
-        # Карточка OrangePi
         op_info = bc.stands["OrangePi"]
         op_card = StandCard("OrangePi", op_info.ip, op_info.username, op_info.stand_type)
         op_card.connect_btn.clicked.connect(lambda: connect_stand("OrangePi"))
@@ -556,7 +560,6 @@ def main():
         
         act_row = QHBoxLayout()
         act_row.addStretch()
-        QPushButton("ЗАПУСТИТЬ", clicked=start_1po2, styleSheet="QPushButton{background:#4caf50;}").setParent(act_row.widget())
         act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=start_1po2, styleSheet="QPushButton{background:#4caf50;}"))
         act_row.addWidget(QPushButton("ОСТАНОВИТЬ", clicked=stop_1po2, styleSheet="QPushButton{background:#d24a4a;}"))
         act_row.addWidget(QPushButton("ПЕРЕЗАПУСТИТЬ", clicked=restart_1po2, styleSheet="QPushButton{background:#ff9800;}"))
@@ -624,11 +627,17 @@ def main():
                 board_path.setText(f"{board_path.text().rstrip('/')}/{item.text(0)}")
                 browse_files()
         
+        def go_up():
+            cur = board_path.text().rstrip('/')
+            if cur != '/':
+                board_path.setText(os.path.dirname(cur) or '/')
+                browse_files()
+        
         board_btn_row = QHBoxLayout()
         board_btn_row.addStretch()
         board_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_files))
         board_btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_folder))
-        board_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=lambda: (board_path.setText(os.path.dirname(board_path.text().rstrip('/')) or '/'), browse_files())))
+        board_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=go_up))
         board_btn_row.addStretch()
         board_layout.addLayout(board_btn_row)
         
@@ -644,40 +653,7 @@ def main():
         log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: log_text.clear()))
         tabs.addTab(log_tab, "ЛОГИ")
         
-        # ============================================================
-        # ФУНКЦИИ
-        # ============================================================
-        
-        def update_cards():
-            for name, card in stand_cards.items():
-                if name in bc.stands:
-                    info = bc.stands[name]
-                    card.update_status(info.status, info.connected)
-            online = sum(1 for s in bc.stands.values() if s.status == "online")
-            connected = sum(1 for s in bc.stands.values() if s.connected)
-            status_indicator.setText(f"ONLINE: {online}/4 | CONNECTED: {connected}")
-        
-        def connect_stand(name):
-            info = bc.stands[name]
-            if info.status != "online":
-                QMessageBox.warning(window, "Ошибка", f"Стенд {name} не в сети!")
-                return
-            stand_cards[name].update_status("connecting", False)
-            QApplication.processEvents()
-            if bc.connect(name):
-                QMessageBox.information(window, "Успех", f"Подключен к {name}")
-            else:
-                QMessageBox.critical(window, "Ошибка", f"Не удалось подключиться к {name}")
-            update_cards()
-        
-        def disconnect_stand(name):
-            bc.disconnect(name)
-            update_cards()
-        
-        refresh_btn.clicked.connect(update_cards)
-        refresh_op_btn.clicked.connect(update_cards)
-        
-        # Таймер
+        # Таймеры и автостарт
         timer = QTimer()
         timer.timeout.connect(update_cards)
         timer.start(3000)
