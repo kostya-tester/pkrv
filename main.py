@@ -1,6 +1,6 @@
 """
 Bench Manager - полностью автономный файл с GUI и картинками.
-Использует paramiko для подключения к старым стендам (ГОЗ/Арктика/C1M).
+Использует plink.exe для подключения к старым стендам (ГОЗ/Арктика/C1M).
 """
 
 import sys
@@ -52,8 +52,24 @@ class BenchConnector:
     def __init__(self):
         self.stands = {}
         self.monitoring = False
-        self.ssh_clients = {}
+        self.connections = {}
+        self.plink_path = None
         self._init_stands()
+        self._find_plink()
+    
+    def _find_plink(self):
+        paths = []
+        if getattr(sys, 'frozen', False):
+            paths.append(os.path.join(sys._MEIPASS, "plink.exe"))
+        paths.extend([
+            os.path.join(APP_DIR, "plink.exe"),
+            os.path.join(APP_DIR, "tools", "plink.exe"),
+            "plink.exe"
+        ])
+        for p in paths:
+            if os.path.exists(p):
+                self.plink_path = p
+                break
     
     def _init_stands(self):
         for name, cfg in self.STANDS.items():
@@ -87,6 +103,26 @@ class BenchConnector:
     
     def stop_monitoring(self): self.monitoring = False
 
+    def _run_plink(self, name, command, timeout=15):
+        """Запускает plink с echo y для принятия ключа"""
+        info = self.stands[name]
+        if not self.plink_path:
+            return -1, "", "plink.exe не найден!"
+        
+        plink_cmd = f'echo y | "{self.plink_path}" -ssh -pw {info.password} -t {info.username}@{info.ip} "{command}"'
+        
+        try:
+            proc = subprocess.Popen(plink_cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+                return proc.returncode, stdout or "", stderr or ""
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+                return -1, stdout or "", "Таймаут подключения"
+        except Exception as e:
+            return -1, "", str(e)
+
     def connect(self, name, password=None):
         if name not in self.stands: 
             return False, f"Стенд {name} не найден"
@@ -96,127 +132,64 @@ class BenchConnector:
         if not password:
             return False, f"Нет пароля для стенда {name}"
         
-        try:
-            import paramiko
-        except ImportError:
-            return False, "Библиотека paramiko не установлена. Выполните: pip install paramiko"
-        
         if name in self.STANDS:
-            return self._connect_with_su(name, info, password)
+            return self._connect_stand(name, info, password)
         else:
-            return self._connect_simple(name, info, password)
+            return self._connect_orange(name, info, password)
     
-    def _connect_simple(self, name, info, password):
-        """Обычное подключение (OrangePi)"""
-        import paramiko
-        try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(
-                info.ip, username=info.username, password=password,
-                timeout=10, look_for_keys=False, allow_agent=False,
-                disabled_algorithms={'pubkeys': []}
-            )
-            self.ssh_clients[name] = ssh
+    def _connect_stand(self, name, info, password):
+        """Подключение к ГОЗ/Арктика/C1M: plink + su + qconn"""
+        if not self.plink_path:
+            return False, "plink.exe не найден!\nСкачайте с https://the.earth.li/~sgtatham/putty/latest/w64/plink.exe"
+        
+        # Принимаем ключ хоста
+        self._run_plink(name, "exit", timeout=10)
+        
+        # su + qconn
+        remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
+        code, stdout, stderr = self._run_plink(name, remote_cmd, timeout=20)
+        
+        if 'OK' in stdout:
             info.connected = True
-            return True, f"Подключен к {name}"
-        except paramiko.AuthenticationException:
-            return False, "Неверный логин или пароль"
-        except Exception as e:
-            return False, f"Ошибка: {str(e)[:300]}"
+            self.connections[name] = True
+            return True, f"Подключен к {name}\n(su + qconn выполнены)"
+        
+        if 'FAIL' in stdout:
+            return False, "Пароль SSH принят, но su или qconn не сработали."
+        elif 'Permission denied' in stdout or 'Access denied' in stdout:
+            return False, "Неверный логин или пароль."
+        else:
+            return False, f"Ошибка подключения.\n\nSTDOUT:\n{stdout[-300:]}\n\nSTDERR:\n{stderr[-300:]}"
     
-    def _connect_with_su(self, name, info, password):
-        """Подключение + su + qconn"""
-        import paramiko
-        try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
-            # Пробуем разные комбинации алгоритмов
-            connect_kwargs = {
-                'hostname': info.ip,
-                'username': info.username,
-                'password': password,
-                'timeout': 10,
-                'look_for_keys': False,
-                'allow_agent': False,
-            }
-            
-            # Пробуем без ограничений
-            try:
-                ssh.connect(**connect_kwargs)
-            except:
-                # Пробуем с отключением pubkeys
-                try:
-                    ssh.connect(**connect_kwargs, disabled_algorithms={'pubkeys': []})
-                except:
-                    # Пробуем вообще без проверки ключей
-                    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
-                    ssh.connect(**connect_kwargs)
-            
-            # Выполняем su и qconn через shell
-            channel = ssh.invoke_shell()
-            time.sleep(0.3)
-            channel.recv(4096)
-            
-            channel.send(f"su\n")
-            time.sleep(0.3)
-            channel.send(f"{password}\n")
-            time.sleep(0.3)
-            channel.send("qconn\n")
-            time.sleep(0.3)
-            channel.send("ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL\n")
-            time.sleep(0.5)
-            
-            output = ""
-            for _ in range(10):
-                if channel.recv_ready():
-                    output += channel.recv(4096).decode('utf-8', errors='ignore')
-                time.sleep(0.1)
-            
-            channel.close()
-            
-            if 'OK' in output:
-                self.ssh_clients[name] = ssh
-                info.connected = True
-                return True, f"Подключен к {name}\n(su + qconn выполнены)"
-            else:
-                ssh.close()
-                if 'FAIL' in output:
-                    return False, "Пароль SSH принят, но su или qconn не сработали."
-                return False, f"Не удалось выполнить su/qconn.\nОтвет: {output[-300:]}"
-                
-        except paramiko.AuthenticationException:
-            return False, "Неверный логин или пароль SSH"
-        except Exception as e:
-            return False, f"Ошибка подключения: {str(e)[:300]}"
+    def _connect_orange(self, name, info, password):
+        """Подключение к OrangePi"""
+        if not self.plink_path:
+            return False, "plink.exe не найден!"
+        code, stdout, stderr = self._run_plink(name, "echo OK", timeout=10)
+        if 'OK' in stdout:
+            info.connected = True
+            self.connections[name] = True
+            return True, f"Подключен к {name}"
+        return False, f"Ошибка:\n{stdout[-200:]}\n{stderr[-200:]}"
     
     def disconnect(self, name):
-        if name in self.ssh_clients:
-            try:
-                self.ssh_clients[name].close()
-            except: pass
-            del self.ssh_clients[name]
         if name in self.stands:
             self.stands[name].connected = False
+        self.connections.pop(name, None)
     
     def execute(self, name, command, timeout=30):
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
+        pwd = info.password
         
-        if name in self.ssh_clients:
-            try:
-                if name in self.STANDS:
-                    full_cmd = f"echo '{info.password}' | su -c 'qconn && {command}'"
-                else:
-                    full_cmd = command
-                stdin, stdout, stderr = self.ssh_clients[name].exec_command(full_cmd, timeout=timeout)
-                return True, stdout.read().decode('utf-8', errors='ignore'), stderr.read().decode('utf-8', errors='ignore')
-            except Exception as e:
-                return False, "", str(e)
+        if name in self.STANDS:
+            full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
         else:
-            return False, "", "Нет SSH-клиента"
+            full_cmd = command
+        
+        code, stdout, stderr = self._run_plink(name, full_cmd, timeout=timeout)
+        return code == 0, stdout, stderr
     
     def get_all_info(self):
         return {name: {"name": s.name, "ip": s.ip, "username": s.username,
@@ -435,6 +408,7 @@ def main():
             bc.disconnect(name)
             update_cards()
         
+        # === ВКЛАДКИ ===
         # СТЕНДЫ
         stands_tab = QWidget()
         stands_layout = QVBoxLayout(stands_tab)
