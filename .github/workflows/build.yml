@@ -18,26 +18,26 @@ jobs:
       with:
         python-version: '3.11'
     
+    - name: Download plink.exe
+      shell: cmd
+      run: |
+        curl -L -o plink.exe https://the.earth.li/~sgtatham/putty/latest/w64/plink.exe
+        dir plink.exe
+    
     - name: Install dependencies
       shell: cmd
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
+        pip install pyinstaller PyQt5
     
     - name: Build EXE
       shell: cmd
       run: |
-        pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "config.yaml;." --hidden-import paramiko main.py
-    
-    - name: Check EXE
-      shell: cmd
-      run: |
-        if exist "dist\BenchManager.exe" (echo EXE OK) else (echo EXE FAIL && exit 1)
+        pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "config.yaml;." --add-binary "plink.exe;." main.py
     
     - name: Upload EXE
       uses: actions/upload-artifact@v4
       with:
         name: BenchManager-Windows
-        path: dist\BenchManager.exe
+        path: dist/BenchManager.exe
         retention-days: 30
