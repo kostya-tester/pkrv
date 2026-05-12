@@ -106,16 +106,26 @@ class BenchConnector:
         
         # Для старых стендов с plink
         if name in self.STANDS and PLINK_PATH:
+            # plink сначала сохраняет ключ в реестр, потом выполняет команду
+            # -batch отключает интерактивные запросы
             if tty:
-                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -t {info.username}@{info.ip} "{remote_cmd}"'
+                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -batch -t {info.username}@{info.ip} "{remote_cmd}"'
             else:
-                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} {info.username}@{info.ip} "{remote_cmd}"'
+                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -batch {info.username}@{info.ip} "{remote_cmd}"'
         else:
             opts = self.NORMAL_SSH_OPTS
             if tty: opts = "-tt " + opts
             cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
         
-        return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        try:
+            return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Создаём объект с ошибкой таймаута
+            result = subprocess.CompletedProcess(cmd, -1, "", "Таймаут подключения")
+            return result
+        except Exception as e:
+            result = subprocess.CompletedProcess(cmd, -1, "", str(e))
+            return result)
 
     def connect(self, name, password=None):
         """Подключение к стенду. Возвращает (успех, сообщение)."""
