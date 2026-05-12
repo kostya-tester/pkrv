@@ -48,6 +48,23 @@ class BenchConnector:
     
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
+    # SSH опции для старых алгоритмов
+    SSH_OPTS = (
+        "-o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=/dev/null "
+        "-o HostKeyAlgorithms=+ssh-rsa,ssh-dss "
+        "-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 "
+        "-o ConnectTimeout=10"
+    )
+    
+    SSH_OPTS_WIN = (
+        "-o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=NUL "
+        "-o HostKeyAlgorithms=+ssh-rsa,ssh-dss "
+        "-o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1 "
+        "-o ConnectTimeout=10"
+    )
+    
     def __init__(self):
         self.stands = {}
         self.monitoring = False
@@ -85,6 +102,13 @@ class BenchConnector:
     
     def stop_monitoring(self): self.monitoring = False
 
+    def _ssh_opts(self, tty=False):
+        """Возвращает строку опций SSH"""
+        base = self.SSH_OPTS_WIN if os.name == 'nt' else self.SSH_OPTS
+        if tty:
+            base = "-tt " + base
+        return base
+
     def connect(self, name, password=None):
         """Подключение к стенду. Возвращает (успех, сообщение)."""
         if name not in self.stands: 
@@ -105,10 +129,8 @@ class BenchConnector:
     def _connect_simple(self, name, info, password):
         """Обычное SSH подключение (OrangePi)"""
         try:
-            if os.name == 'nt':
-                cmd = f'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
-            else:
-                cmd = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} 'echo OK'"
+            opts = self._ssh_opts(tty=False)
+            cmd = f'ssh {opts} {info.username}@{info.ip} "echo OK"'
             
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             
@@ -116,7 +138,7 @@ class BenchConnector:
                 info.connected = True
                 return True, f"Подключен к {name}"
             
-            return False, f"Не удалось подключиться.\nОтвет: {result.stdout.strip()[-200:]}\nОшибка: {result.stderr.strip()[-200:]}"
+            return False, f"Не удалось подключиться.\n\nОтвет:\n{result.stdout.strip()[-200:]}\n\nSTDERR:\n{result.stderr.strip()[-200:]}"
         except subprocess.TimeoutExpired:
             return False, "Таймаут подключения (10 секунд)"
         except Exception as e:
@@ -126,11 +148,8 @@ class BenchConnector:
         """SSH → su → qconn. Возвращает (успех, сообщение_с_диагностикой)."""
         try:
             remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-            
-            if os.name == 'nt':
-                cmd = f'ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=10 {info.username}@{info.ip} "{remote_cmd}"'
-            else:
-                cmd = f"sshpass -p '{password}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 {info.username}@{info.ip} '{remote_cmd}'"
+            opts = self._ssh_opts(tty=True)
+            cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
             
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20)
             
@@ -142,46 +161,40 @@ class BenchConnector:
                 info.connected = True
                 return True, f"Подключен к {name}\n(su + qconn выполнены)"
             
-            # Анализируем ошибку
-            error_details = []
-            error_details.append(f"Не удалось подключиться к {name}.\n")
-            error_details.append(f"Хост: {info.username}@{info.ip}")
-            error_details.append(f"Пароль: {'***' if password else 'не задан'}")
-            error_details.append("")
+            # Диагностика ошибки
+            error_msg = f"Не удалось подключиться к {name}.\n\n"
+            error_msg += f"Хост: {info.username}@{info.ip}\n\n"
             
             if 'FAIL' in stdout:
-                error_details.append("ОШИБКА: su или qconn не сработали.")
-                error_details.append("Пароль принят, но команда su/qconn не выполнилась.")
-            elif 'Password:' in stdout or 'password' in stdout.lower():
-                error_details.append("ОШИБКА: SSH запросил пароль интерактивно.")
-                error_details.append("Не удалось передать пароль автоматически.")
+                error_msg += "Пароль SSH принят, но su или qconn не сработали.\n"
+                error_msg += "Проверьте пароль на стенде."
             elif 'Permission denied' in stdout or 'Permission denied' in stderr:
-                error_details.append("ОШИБКА: Неверный логин или пароль SSH.")
+                error_msg += "Неверный логин или пароль SSH."
             elif 'Connection refused' in stderr:
-                error_details.append("ОШИБКА: SSH-соединение отклонено.")
-            elif 'timed out' in stdout.lower() or 'timed out' in stderr.lower():
-                error_details.append("ОШИБКА: Таймаут соединения.")
-            elif 'No route to host' in stderr:
-                error_details.append("ОШИБКА: Нет маршрута до стенда.")
+                error_msg += "SSH-соединение отклонено (порт 22)."
             else:
-                error_details.append(f"Ответ сервера:\n{stdout[-300:] if stdout else '(пусто)'}")
+                if stdout:
+                    error_msg += f"Ответ сервера:\n{stdout[-400:]}"
                 if stderr:
-                    error_details.append(f"\nSTDERR:\n{stderr[-200:]}")
+                    error_msg += f"\n\nSTDERR:\n{stderr[-400:]}"
+                if not stdout and not stderr:
+                    error_msg += "Сервер не вернул ответ."
             
-            return False, "\n".join(error_details)
+            return False, error_msg
                 
         except subprocess.TimeoutExpired:
-            return False, f"Таймаут подключения к {name} (20 секунд).\nСтенд не ответил за отведённое время."
+            return False, f"Таймаут подключения к {name} (20 секунд)."
         except FileNotFoundError:
             return False, "Команда ssh не найдена!\nУстановите OpenSSH Client."
         except Exception as e:
-            return False, f"Ошибка Python: {type(e).__name__}: {e}"
+            return False, f"Ошибка: {type(e).__name__}: {e}"
     
     def disconnect(self, name):
         if name in self.stands:
             self.stands[name].connected = False
     
     def execute(self, name, command, timeout=30):
+        """Выполнение команды через su"""
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
@@ -192,10 +205,8 @@ class BenchConnector:
         else:
             full_cmd = command
         
-        if os.name == 'nt':
-            cmd = f'ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL {info.username}@{info.ip} "{full_cmd}"'
-        else:
-            cmd = f"sshpass -p '{pwd}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {info.username}@{info.ip} '{full_cmd}'"
+        opts = self._ssh_opts(tty=True)
+        cmd = f'ssh {opts} {info.username}@{info.ip} "{full_cmd}"'
         
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -516,11 +527,10 @@ def main():
         
         tabs.addTab(orange_tab, "ORANGEPI")
         
-        # ---- ВКЛАДКА 3: ФАЙЛЫ СТЕНДОВ (ГОЗ/Арктика/C1M) ----
+        # ---- ВКЛАДКА 3: ФАЙЛЫ СТЕНДОВ ----
         files_tab = QWidget()
         files_layout = QVBoxLayout(files_tab)
         
-        # Выбор стенда и пути
         files_sel = QHBoxLayout()
         files_sel.addStretch()
         files_sel.addWidget(QLabel("Стенд:"))
@@ -535,7 +545,6 @@ def main():
         files_sel.addStretch()
         files_layout.addLayout(files_sel)
         
-        # Быстрые кнопки папок (только для основных стендов)
         quick_row = QHBoxLayout()
         quick_row.addStretch()
         for path, label in [("/home/pkrv/CVS", "📁 CVS"), ("/tmp", "📁 /tmp"), ("/fead_hd", "📁 fead_hd")]:
@@ -546,7 +555,6 @@ def main():
         quick_row.addStretch()
         files_layout.addLayout(quick_row)
         
-        # Дерево файлов
         files_tree = QTreeWidget()
         files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
         files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
@@ -602,7 +610,7 @@ def main():
         
         tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
         
-        # ---- ВКЛАДКА 4: ФАЙЛЫ ORANGEPI (без быстрых кнопок) ----
+        # ---- ВКЛАДКА 4: ФАЙЛЫ ORANGEPI ----
         op_files_tab = QWidget()
         op_files_layout = QVBoxLayout(op_files_tab)
         
@@ -611,7 +619,6 @@ def main():
         op_files_sel.addWidget(QLabel("Стенд:"))
         op_files_stand = QComboBox()
         op_files_stand.addItems(["OrangePi"])
-        op_files_stand.setMinimumWidth(180)
         op_files_sel.addWidget(op_files_stand)
         op_files_sel.addWidget(QLabel("Путь:"))
         op_files_path = QLineEdit("/")
