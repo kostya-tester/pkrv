@@ -123,7 +123,6 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def connect(self, name, password=None):
-        """Подключение к стенду"""
         if name not in self.stands: return False
         info = self.stands[name]
         if password is None: password = info.password
@@ -137,7 +136,6 @@ class BenchConnector:
             return self._connect_simple(name, info, password)
     
     def _connect_simple(self, name, info, password):
-        """Обычное SSH подключение (OrangePi)"""
         try:
             if os.name == 'nt':
                 cmd = f'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
@@ -152,7 +150,6 @@ class BenchConnector:
         except: return False
     
     def _connect_with_su(self, name, info, password):
-        """SSH → su → qconn для ГОЗ/Арктика/C1M"""
         try:
             if os.name == 'nt':
                 remote_cmd = f"echo {password} | su -c 'qconn && ls /home/pkrv/CVS > /dev/null && echo OK || echo FAIL'"
@@ -177,7 +174,6 @@ class BenchConnector:
             self.stands[name].connected = False
     
     def execute(self, name, command, timeout=30):
-        """Выполнение команды через su"""
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
@@ -246,7 +242,7 @@ def main():
         from PyQt5.QtGui import QPixmap, QIcon, QColor
         
         # ============================================================
-        # КАРТИНКИ (УВЕЛИЧЕННЫЕ)
+        # КАРТИНКИ
         # ============================================================
         
         STAND_IMAGES = {
@@ -278,7 +274,7 @@ def main():
             return None
         
         # ============================================================
-        # КАРТОЧКА СТЕНДА (УВЕЛИЧЕННАЯ)
+        # КАРТОЧКА СТЕНДА
         # ============================================================
         
         class StandCard(QFrame):
@@ -293,7 +289,6 @@ def main():
                 layout.setSpacing(8)
                 layout.setContentsMargins(15, 15, 15, 15)
                 
-                # Картинка (увеличенная)
                 img_name = STAND_IMAGES.get(name, "logo.png")
                 img_label = QLabel()
                 img_label.setPixmap(load_pixmap(img_name, 300, 200))
@@ -301,32 +296,27 @@ def main():
                 img_label.setStyleSheet("background: transparent; border: none;")
                 layout.addWidget(img_label)
                 
-                # Название
                 name_lbl = QLabel(name)
                 name_lbl.setStyleSheet("color: #cdd6f4; font-size: 20px; font-weight: bold; background: transparent;")
                 name_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(name_lbl)
                 
-                # IP
                 ip_lbl = QLabel(f"{username}@{ip}")
                 ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 12px; background: transparent;")
                 ip_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(ip_lbl)
                 
-                # Тип
                 if stand_type:
                     type_lbl = QLabel(stand_type)
                     type_lbl.setStyleSheet("color: #6a6aaa; font-size: 10px; background: transparent;")
                     type_lbl.setAlignment(Qt.AlignCenter)
                     layout.addWidget(type_lbl)
                 
-                # Статус
                 self.status_lbl = QLabel("OFFLINE")
                 self.status_lbl.setStyleSheet("color: #f44336; font-size: 14px; font-weight: bold; background: transparent;")
                 self.status_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.status_lbl)
                 
-                # Индикатор
                 self.indicator = QLabel("●")
                 self.indicator.setStyleSheet("color: #f44336; font-size: 16px; background: transparent;")
                 self.indicator.setAlignment(Qt.AlignCenter)
@@ -334,7 +324,6 @@ def main():
                 
                 layout.addSpacing(10)
                 
-                # Кнопки
                 self.connect_btn = QPushButton("ПОДКЛЮЧИТЬ")
                 self.connect_btn.setMinimumHeight(35)
                 self.connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #66bb6a; }")
@@ -370,6 +359,108 @@ def main():
                     self.disconnect_btn.setEnabled(False)
         
         # ============================================================
+        # КОМПОНЕНТ ПРОСМОТРА ФАЙЛОВ
+        # ============================================================
+        
+        def create_file_browser(placeholder_path="/home/pkrv/CVS", stand_filter=None):
+            """Создаёт виджет просмотра файлов.
+            stand_filter: None = все стенды, список = только указанные
+            """
+            widget = QWidget()
+            layout = QVBoxLayout(widget)
+            
+            # Выбор стенда
+            sel_row = QHBoxLayout()
+            sel_row.addStretch()
+            sel_row.addWidget(QLabel("Стенд:"))
+            stand_combo = QComboBox()
+            if stand_filter:
+                stand_combo.addItems(stand_filter)
+            else:
+                stand_combo.addItems(list(bc.STANDS.keys()) + ["OrangePi"])
+            stand_combo.setMinimumWidth(180)
+            sel_row.addWidget(stand_combo)
+            sel_row.addWidget(QLabel("Путь:"))
+            path_edit = QLineEdit(placeholder_path)
+            path_edit.setMinimumWidth(350)
+            sel_row.addWidget(path_edit)
+            sel_row.addStretch()
+            layout.addLayout(sel_row)
+            
+            # Быстрые кнопки папок (только для основных стендов)
+            if stand_filter:
+                quick_row = QHBoxLayout()
+                quick_row.addStretch()
+                for folder_path, folder_label in [
+                    ("/home/pkrv/CVS", "📁 CVS"),
+                    ("/tmp", "📁 /tmp"),
+                    ("/fead_hd", "📁 fead_hd")
+                ]:
+                    btn = QPushButton(folder_label)
+                    btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; background-color: #3a3a6a; } QPushButton:hover { background-color: #5a5a9a; }")
+                    btn.clicked.connect(lambda checked, p=folder_path: (path_edit.setText(p), browse_files()))
+                    quick_row.addWidget(btn)
+                quick_row.addStretch()
+                layout.addLayout(quick_row)
+            
+            # Дерево файлов
+            tree = QTreeWidget()
+            tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
+            tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
+            layout.addWidget(tree)
+            
+            # Лог
+            log_edit = QTextEdit()
+            log_edit.setReadOnly(True)
+            log_edit.setMaximumHeight(50)
+            layout.addWidget(log_edit)
+            
+            def browse_files():
+                name = stand_combo.currentText()
+                path = path_edit.text().strip() or "/"
+                if name in bc.stands and bc.stands[name].connected:
+                    tree.clear()
+                    ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                    if ok:
+                        for line in out.split('\n'):
+                            if line.startswith('total') or not line.strip(): continue
+                            parts = line.split()
+                            if len(parts) >= 8:
+                                fname = ' '.join(parts[7:])
+                                if fname in ['.', '..']: continue
+                                is_dir = line.startswith('d')
+                                item = QTreeWidgetItem([fname, parts[4] if not is_dir else "", "Папка" if is_dir else "Файл", f"{parts[5]} {parts[6]}" if len(parts)>6 else ""])
+                                if is_dir: item.setForeground(0, QColor("#61dafb"))
+                                tree.addTopLevelItem(item)
+                        log_edit.append(f"[OK] {path}")
+                    else:
+                        log_edit.append(f"[ОШИБКА] {err}")
+                else:
+                    log_edit.append(f"[ОШИБКА] Стенд {name} не подключен")
+            
+            def cd_folder():
+                item = tree.currentItem()
+                if item and item.text(2) == "Папка":
+                    path_edit.setText(f"{path_edit.text().rstrip('/')}/{item.text(0)}")
+                    browse_files()
+            
+            def go_up():
+                cur = path_edit.text().rstrip('/')
+                if cur != '/':
+                    path_edit.setText(os.path.dirname(cur) or '/')
+                    browse_files()
+            
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
+            btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+            btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_folder, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+            btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=go_up, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+            btn_row.addStretch()
+            layout.addLayout(btn_row)
+            
+            return widget
+        
+        # ============================================================
         # ОКНО
         # ============================================================
         
@@ -397,7 +488,7 @@ def main():
         main_layout.setContentsMargins(15, 15, 15, 15)
         
         # ============================================================
-        # HEADER (БЕЛЫЙ)
+        # HEADER
         # ============================================================
         header = QFrame()
         header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
@@ -433,7 +524,6 @@ def main():
         stand_cards = {}
         main_stands = ["ГОЗ", "Арктика", "C1M"]
         
-        # Общие функции
         def update_cards():
             for name, card in stand_cards.items():
                 if name in bc.stands:
@@ -482,7 +572,6 @@ def main():
             card.disconnect_btn.clicked.connect(lambda checked, n=name: disconnect_stand(n))
         
         cards_grid.addStretch()
-        
         scroll.setWidget(cards_widget)
         stands_layout.addWidget(scroll)
         
@@ -520,7 +609,15 @@ def main():
         
         tabs.addTab(orange_tab, "ORANGEPI")
         
-        # ---- ВКЛАДКА 3: ПРОЦЕССЫ ----
+        # ---- ВКЛАДКА 3: ФАЙЛЫ СТЕНДОВ (ГОЗ/Арктика/C1M) ----
+        files_tab = create_file_browser("/home/pkrv/CVS", stand_filter=main_stands)
+        tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
+        
+        # ---- ВКЛАДКА 4: ФАЙЛЫ ORANGEPI ----
+        op_files_tab = create_file_browser("/", stand_filter=["OrangePi"])
+        tabs.addTab(op_files_tab, "ФАЙЛЫ ORANGEPI")
+        
+        # ---- ВКЛАДКА 5: ПРОЦЕССЫ ----
         proc_tab = QWidget()
         proc_layout = QVBoxLayout(proc_tab)
         
@@ -579,83 +676,7 @@ def main():
         
         tabs.addTab(proc_tab, "ПРОЦЕССЫ")
         
-        # ---- ВКЛАДКА 4: ПЛАТЫ (ПРОСМОТР ФАЙЛОВ) ----
-        board_tab = QWidget()
-        board_layout = QVBoxLayout(board_tab)
-        
-        board_title = QLabel("ПРОСМОТР ФАЙЛОВ НА ПЛАТЕ")
-        board_title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
-        board_title.setAlignment(Qt.AlignCenter)
-        board_layout.addWidget(board_title)
-        
-        board_sel = QHBoxLayout()
-        board_sel.addStretch()
-        board_sel.addWidget(QLabel("Стенд:"))
-        board_stand = QComboBox()
-        board_stand.addItems(main_stands + ["OrangePi"])
-        board_stand.setMinimumWidth(180)
-        board_sel.addWidget(board_stand)
-        board_sel.addWidget(QLabel("Путь:"))
-        board_path = QLineEdit("/home/pkrv/CVS")
-        board_path.setMinimumWidth(350)
-        board_sel.addWidget(board_path)
-        board_sel.addStretch()
-        board_layout.addLayout(board_sel)
-        
-        board_tree = QTreeWidget()
-        board_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-        board_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; font-size: 12px; }")
-        board_layout.addWidget(board_tree)
-        
-        board_log = QTextEdit()
-        board_log.setReadOnly(True)
-        board_log.setMaximumHeight(60)
-        board_layout.addWidget(board_log)
-        
-        def browse_files():
-            name = board_stand.currentText()
-            path = board_path.text().strip() or "/"
-            if bc.stands[name].connected:
-                board_tree.clear()
-                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
-                if ok:
-                    for line in out.split('\n'):
-                        if line.startswith('total') or not line.strip(): continue
-                        parts = line.split()
-                        if len(parts) >= 8:
-                            fname = ' '.join(parts[7:])
-                            if fname in ['.', '..']: continue
-                            is_dir = line.startswith('d')
-                            item = QTreeWidgetItem([fname, parts[4] if not is_dir else "", "Папка" if is_dir else "Файл", f"{parts[5]} {parts[6]}" if len(parts)>6 else ""])
-                            if is_dir: item.setForeground(0, QColor("#61dafb"))
-                            board_tree.addTopLevelItem(item)
-                    board_log.append(f"[OK] {path}")
-                else: board_log.append(f"[ОШИБКА] {err}")
-            else: board_log.append(f"[ОШИБКА] Нет подключения к {name}")
-        
-        def cd_folder():
-            item = board_tree.currentItem()
-            if item and item.text(2) == "Папка":
-                board_path.setText(f"{board_path.text().rstrip('/')}/{item.text(0)}")
-                browse_files()
-        
-        def go_up():
-            cur = board_path.text().rstrip('/')
-            if cur != '/':
-                board_path.setText(os.path.dirname(cur) or '/')
-                browse_files()
-        
-        board_btn_row = QHBoxLayout()
-        board_btn_row.addStretch()
-        board_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        board_btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_folder, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        board_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=go_up, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        board_btn_row.addStretch()
-        board_layout.addLayout(board_btn_row)
-        
-        tabs.addTab(board_tab, "ПЛАТЫ")
-        
-        # ---- ВКЛАДКА 5: ЛОГИ ----
+        # ---- ВКЛАДКА 6: ЛОГИ ----
         log_tab = QWidget()
         log_layout = QVBoxLayout(log_tab)
         log_text = QTextEdit()
