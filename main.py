@@ -1,6 +1,6 @@
 """
 Bench Manager - полностью автономный файл с GUI и картинками.
-Использует plink.exe для подключения к старым стендам (ГОЗ/Арктика/C1M).
+Подключение через системный SSH с поддержкой старых алгоритмов.
 """
 
 import sys
@@ -49,27 +49,27 @@ class BenchConnector:
     
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
+    # Ключ SSH для старых стендов
+    OLD_SSH_OPTS = (
+        "-o HostKeyAlgorithms=+ssh-rsa "
+        "-o PubkeyAcceptedKeyTypes=+ssh-rsa "
+        "-o MACs=+hmac-md5 "
+        "-o StrictHostKeyChecking=no "
+        "-o LogLevel=ERROR "
+        "-o UserKnownHostsFile=NUL "
+        "-o ConnectTimeout=10"
+    )
+    
+    NORMAL_SSH_OPTS = (
+        "-o StrictHostKeyChecking=no "
+        "-o UserKnownHostsFile=NUL "
+        "-o ConnectTimeout=5"
+    )
+    
     def __init__(self):
         self.stands = {}
         self.monitoring = False
-        self.connections = {}
-        self.plink_path = None
         self._init_stands()
-        self._find_plink()
-    
-    def _find_plink(self):
-        paths = []
-        if getattr(sys, 'frozen', False):
-            paths.append(os.path.join(sys._MEIPASS, "plink.exe"))
-        paths.extend([
-            os.path.join(APP_DIR, "plink.exe"),
-            os.path.join(APP_DIR, "tools", "plink.exe"),
-            "plink.exe"
-        ])
-        for p in paths:
-            if os.path.exists(p):
-                self.plink_path = p
-                break
     
     def _init_stands(self):
         for name, cfg in self.STANDS.items():
@@ -103,16 +103,22 @@ class BenchConnector:
     
     def stop_monitoring(self): self.monitoring = False
 
-    def _run_plink(self, name, command, timeout=15):
-        """Запускает plink с echo y для принятия ключа"""
+    def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=15):
+        """Выполняет SSH команду с правильными опциями"""
         info = self.stands[name]
-        if not self.plink_path:
-            return -1, "", "plink.exe не найден!"
         
-        plink_cmd = f'echo y | "{self.plink_path}" -ssh -pw {info.password} -t {info.username}@{info.ip} "{command}"'
+        if name in self.STANDS:
+            opts = self.OLD_SSH_OPTS
+        else:
+            opts = self.NORMAL_SSH_OPTS
+        
+        if use_tty:
+            opts = "-tt " + opts
+        
+        cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
         
         try:
-            proc = subprocess.Popen(plink_cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = subprocess.Popen(cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
                 return proc.returncode, stdout or "", stderr or ""
@@ -138,44 +144,32 @@ class BenchConnector:
             return self._connect_orange(name, info, password)
     
     def _connect_stand(self, name, info, password):
-        """Подключение к ГОЗ/Арктика/C1M: plink + su + qconn"""
-        if not self.plink_path:
-            return False, "plink.exe не найден!\nСкачайте с https://the.earth.li/~sgtatham/putty/latest/w64/plink.exe"
-        
-        # Принимаем ключ хоста
-        self._run_plink(name, "exit", timeout=10)
-        
-        # su + qconn
+        """Подключение: SSH → su → qconn"""
         remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-        code, stdout, stderr = self._run_plink(name, remote_cmd, timeout=20)
+        code, stdout, stderr = self._ssh_command(name, remote_cmd, use_tty=True, timeout=20)
         
         if 'OK' in stdout:
             info.connected = True
-            self.connections[name] = True
             return True, f"Подключен к {name}\n(su + qconn выполнены)"
         
         if 'FAIL' in stdout:
             return False, "Пароль SSH принят, но su или qconn не сработали."
-        elif 'Permission denied' in stdout or 'Access denied' in stdout:
+        elif 'Permission denied' in stdout or 'Permission denied' in stderr:
             return False, "Неверный логин или пароль."
         else:
             return False, f"Ошибка подключения.\n\nSTDOUT:\n{stdout[-300:]}\n\nSTDERR:\n{stderr[-300:]}"
     
     def _connect_orange(self, name, info, password):
         """Подключение к OrangePi"""
-        if not self.plink_path:
-            return False, "plink.exe не найден!"
-        code, stdout, stderr = self._run_plink(name, "echo OK", timeout=10)
+        code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10)
         if 'OK' in stdout:
             info.connected = True
-            self.connections[name] = True
             return True, f"Подключен к {name}"
         return False, f"Ошибка:\n{stdout[-200:]}\n{stderr[-200:]}"
     
     def disconnect(self, name):
         if name in self.stands:
             self.stands[name].connected = False
-        self.connections.pop(name, None)
     
     def execute(self, name, command, timeout=30):
         if name not in self.stands or not self.stands[name].connected:
@@ -188,7 +182,7 @@ class BenchConnector:
         else:
             full_cmd = command
         
-        code, stdout, stderr = self._run_plink(name, full_cmd, timeout=timeout)
+        code, stdout, stderr = self._ssh_command(name, full_cmd, use_tty=True, timeout=timeout)
         return code == 0, stdout, stderr
     
     def get_all_info(self):
@@ -408,7 +402,6 @@ def main():
             bc.disconnect(name)
             update_cards()
         
-        # === ВКЛАДКИ ===
         # СТЕНДЫ
         stands_tab = QWidget()
         stands_layout = QVBoxLayout(stands_tab)
