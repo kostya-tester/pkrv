@@ -13,17 +13,24 @@ from typing import Dict, List, Optional, Tuple, Any, Callable
 from datetime import datetime
 
 # ============================================================
-# ПУТИ
+# ПУТИ - ИСПРАВЛЕНО ДЛЯ EXE
 # ============================================================
 
 if getattr(sys, 'frozen', False):
-    BASE_DIR = sys._MEIPASS
-    APP_DIR = os.path.dirname(sys.executable)
+    # Запуск из EXE
+    BASE_DIR = sys._MEIPASS  # Временная папка PyInstaller
 else:
+    # Запуск из Python
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    APP_DIR = BASE_DIR
 
 IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
+
+# Для отладки
+print(f"DEBUG: BASE_DIR = {BASE_DIR}")
+print(f"DEBUG: IMAGES_DIR = {IMAGES_DIR}")
+print(f"DEBUG: exists = {os.path.exists(IMAGES_DIR)}")
+if os.path.exists(IMAGES_DIR):
+    print(f"DEBUG: files = {os.listdir(IMAGES_DIR)}")
 
 # ============================================================
 # ВСТРОЕННЫЙ ЛОГГЕР
@@ -77,12 +84,11 @@ class StandInfo:
         }
 
 class BenchConnector:
-    # Пароли вшиты для ГОЗ, Арктика, C1M
     STANDS = {
         "ГОЗ": {"ip": "192.168.243.248", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
         "Арктика": {"ip": "192.168.243.249", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
         "C1M": {"ip": "192.168.243.254", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
-        "OrangePi": {"ip": "192.168.243.46", "username": "root", "password": "orangepi", "type": "Orange Pi"}
+        "OrangePi": {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     }
     
     def __init__(self):
@@ -127,7 +133,6 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
     
     def connect(self, name, password=None):
-        """Подключение. Если пароль не передан - берёт из конфига."""
         if name not in self.stands: return False
         info = self.stands[name]
         
@@ -158,7 +163,6 @@ class BenchConnector:
             return False
     
     def auto_connect_all(self):
-        """Автоподключение ко всем стендам с известными паролями"""
         results = {}
         for name, info in self.stands.items():
             if info.status == "online" and info.password:
@@ -169,7 +173,6 @@ class BenchConnector:
     def disconnect(self, name):
         if name in self.stands:
             self.stands[name].connected = False
-            self.logger.info(f"Отключен от {name}")
     
     def execute(self, name, command, timeout=30):
         if name not in self.stands or not self.stands[name].connected:
@@ -219,7 +222,6 @@ def main():
         for name, info in bc.get_all_info().items():
             s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
             print(f"  {name} ({info['ip']}): {s}")
-        print("\nАвтоподключение...")
         bc.auto_connect_all()
         import code
         code.interact(local={'bc': bc})
@@ -243,10 +245,6 @@ def main():
         # КАРТИНКИ
         # ============================================================
         
-        # Логируем путь для отладки
-        print(f"IMAGES_DIR: {IMAGES_DIR}")
-        print(f"Файлы в папке: {os.listdir(IMAGES_DIR) if os.path.exists(IMAGES_DIR) else 'НЕТ ПАПКИ'}")
-        
         STAND_IMAGES = {
             "ГОЗ": "goz.png",
             "Арктика": "arktika.png",
@@ -255,26 +253,22 @@ def main():
         }
         
         def load_pixmap(name, width=200, height=130):
-            """Ищет картинку в IMAGES_DIR и в текущей папке"""
-            # Ищем в IMAGES_DIR
-            path = os.path.join(IMAGES_DIR, name)
-            if not os.path.exists(path):
-                # Ищем рядом с EXE
-                path2 = os.path.join(APP_DIR, "gui", "images", name)
-                if os.path.exists(path2):
-                    path = path2
-                else:
-                    # Ищем просто рядом
-                    path3 = os.path.join(APP_DIR, name)
-                    if os.path.exists(path3):
-                        path = path3
+            """Загружает картинку, ищет в нескольких местах"""
+            # Список мест для поиска
+            search_paths = [
+                os.path.join(IMAGES_DIR, name),
+                os.path.join(BASE_DIR, "gui", "images", name),
+                os.path.join(os.path.dirname(sys.executable), "gui", "images", name) if getattr(sys, 'frozen', False) else None,
+                os.path.join(os.path.dirname(sys.executable), name) if getattr(sys, 'frozen', False) else None,
+            ]
             
-            if os.path.exists(path):
-                pix = QPixmap(path)
-                if not pix.isNull():
-                    return pix.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            for path in search_paths:
+                if path and os.path.exists(path):
+                    pix = QPixmap(path)
+                    if not pix.isNull():
+                        return pix.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             
-            # Заглушка
+            # Заглушка — цветной прямоугольник с текстом
             pix = QPixmap(width, height)
             pix.fill(QColor("#2a2a4a"))
             return pix
@@ -303,28 +297,32 @@ def main():
                 img_label.setStyleSheet("background: transparent; border: none;")
                 layout.addWidget(img_label)
                 
-                # Текст
+                # Название
                 name_lbl = QLabel(name)
                 name_lbl.setStyleSheet("color: #cdd6f4; font-size: 15px; font-weight: bold; background: transparent;")
                 name_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(name_lbl)
                 
+                # IP
                 ip_lbl = QLabel(f"{username}@{ip}")
                 ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 10px; background: transparent;")
                 ip_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(ip_lbl)
                 
+                # Тип
                 if stand_type:
                     type_lbl = QLabel(stand_type)
                     type_lbl.setStyleSheet("color: #6a6aaa; font-size: 9px; background: transparent;")
                     type_lbl.setAlignment(Qt.AlignCenter)
                     layout.addWidget(type_lbl)
                 
+                # Статус
                 self.status_lbl = QLabel("OFFLINE")
                 self.status_lbl.setStyleSheet("color: #f44336; font-size: 12px; font-weight: bold; background: transparent;")
                 self.status_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.status_lbl)
                 
+                # Индикатор
                 self.indicator = QLabel("●")
                 self.indicator.setStyleSheet("color: #f44336; font-size: 12px; background: transparent;")
                 self.indicator.setAlignment(Qt.AlignCenter)
@@ -336,14 +334,12 @@ def main():
                 if status == "online":
                     self.status_lbl.setText("ONLINE")
                     self.status_lbl.setStyleSheet("color: #4caf50; font-size: 12px; font-weight: bold; background: transparent;")
-                    self.indicator.setText("●")
                     self.indicator.setStyleSheet("color: #4caf50; font-size: 12px; background: transparent;")
-                    border = "#4caf50" if connected else "#4caf50"
+                    border = "#4caf50"
                     self.setStyleSheet(f"QFrame {{ background-color: #252545; border: 2px solid {border}; border-radius: 12px; }}")
                 else:
                     self.status_lbl.setText("OFFLINE")
                     self.status_lbl.setStyleSheet("color: #f44336; font-size: 12px; font-weight: bold; background: transparent;")
-                    self.indicator.setText("●")
                     self.indicator.setStyleSheet("color: #f44336; font-size: 12px; background: transparent;")
                     self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 12px; }")
         
@@ -354,14 +350,12 @@ def main():
         app = QApplication(sys.argv)
         
         # Иконка
-        for logo_name in ["logo.png", "gui/images/logo.png"]:
-            logo_path = os.path.join(IMAGES_DIR, logo_name) if "/" not in logo_name else os.path.join(BASE_DIR, logo_name)
-            if os.path.exists(logo_path):
-                app.setWindowIcon(QIcon(logo_path))
-                break
+        logo_path = os.path.join(IMAGES_DIR, "logo.png")
+        if os.path.exists(logo_path):
+            app.setWindowIcon(QIcon(logo_path))
         
         app.setStyleSheet("""
-            QWidget { background-color: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', 'Arial', sans-serif; font-size: 12px; }
+            QWidget { background-color: #1a1a2e; color: #e0e0e0; font-size: 12px; }
             QPushButton { background-color: #4a4ad2; color: white; border: none; border-radius: 5px; padding: 8px 16px; font-weight: bold; }
             QPushButton:hover { background-color: #5a5ae2; }
             QTabWidget::pane { border: 1px solid #3a3a6a; border-radius: 5px; background: #1e1e32; }
@@ -385,13 +379,9 @@ def main():
         header_layout = QHBoxLayout(header)
         
         logo_header = QLabel()
-        for lp in [os.path.join(IMAGES_DIR, "logo.png"), os.path.join(BASE_DIR, "gui", "images", "logo.png")]:
-            if os.path.exists(lp):
-                logo_header.setPixmap(QPixmap(lp).scaled(170, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                break
-        else:
-            logo_header.setText("BENCH MANAGER")
-            logo_header.setStyleSheet("color: #4a4ad2; font-size: 20px; font-weight: bold; background: transparent;")
+        logo_p = load_pixmap("logo.png", 170, 50)
+        logo_header.setPixmap(logo_p)
+        logo_header.setStyleSheet("background: transparent;")
         header_layout.addWidget(logo_header)
         header_layout.addStretch()
         
@@ -451,17 +441,17 @@ def main():
         
         def auto_connect():
             results = bc.auto_connect_all()
-            ok_count = sum(1 for v in results.values() if v)
-            QMessageBox.information(window, "Результат", f"Подключено: {ok_count}/{len(results)}")
+            ok = sum(1 for v in results.values() if v)
+            QMessageBox.information(window, "Результат", f"Подключено: {ok}/{len(results)}")
             update_cards()
         
         connect_btn = QPushButton("ПОДКЛЮЧИТЬ ВСЕ")
-        connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; } QPushButton:hover { background-color: #66bb6a; }")
+        connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; }")
         connect_btn.clicked.connect(auto_connect)
         btn_row.addWidget(connect_btn)
         
         disconnect_btn = QPushButton("ОТКЛЮЧИТЬ ВСЕ")
-        disconnect_btn.setStyleSheet("QPushButton { background-color: #d24a4a; } QPushButton:hover { background-color: #e25a5a; }")
+        disconnect_btn.setStyleSheet("QPushButton { background-color: #d24a4a; }")
         disconnect_btn.clicked.connect(lambda: [bc.disconnect(n) for n in stand_cards] or update_cards())
         btn_row.addWidget(disconnect_btn)
         
@@ -474,8 +464,7 @@ def main():
         proc_tab = QWidget()
         proc_layout = QVBoxLayout(proc_tab)
         proc_layout.addWidget(QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ"))
-        proc_stand = QComboBox()
-        proc_stand.addItems(list(bc.STANDS.keys()))
+        proc_stand = QComboBox(); proc_stand.addItems(list(bc.STANDS.keys()))
         proc_layout.addWidget(proc_stand)
         proc_btns = QHBoxLayout()
         proc_btns.addWidget(QPushButton("ЗАПУСТИТЬ ./1po2_1n"))
@@ -507,12 +496,11 @@ def main():
         log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: log_text.clear()))
         tabs.addTab(log_tab, "ЛОГИ")
         
-        # Таймер
+        # Таймеры
         timer = QTimer()
         timer.timeout.connect(update_cards)
         timer.start(3000)
-        QTimer.singleShot(1000, update_cards)
-        # Автоподключение через 2 секунды
+        QTimer.singleShot(500, update_cards)
         QTimer.singleShot(2000, lambda: [bc.auto_connect_all(), update_cards()])
         
         window.show()
