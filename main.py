@@ -49,7 +49,6 @@ class BenchConnector:
     
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
-    # Ключ SSH для старых стендов
     OLD_SSH_OPTS = (
         "-o HostKeyAlgorithms=+ssh-rsa "
         "-o PubkeyAcceptedKeyTypes=+ssh-rsa "
@@ -60,11 +59,7 @@ class BenchConnector:
         "-o ConnectTimeout=10"
     )
     
-    NORMAL_SSH_OPTS = (
-        "-o StrictHostKeyChecking=no "
-        "-o UserKnownHostsFile=NUL "
-        "-o ConnectTimeout=5"
-    )
+    NORMAL_SSH_OPTS = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5"
     
     def __init__(self):
         self.stands = {}
@@ -80,7 +75,7 @@ class BenchConnector:
     def check_availability(self, ip):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(2)
+            s.settimeout(1)
             r = s.connect_ex((ip, 22))
             s.close()
             return r == 0
@@ -92,7 +87,6 @@ class BenchConnector:
         def loop():
             while self.monitoring:
                 for name, info in self.stands.items():
-                    info.last_check = datetime.now()
                     if self.check_availability(info.ip):
                         info.status = "online"
                     else:
@@ -104,28 +98,15 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=15):
-        """Выполняет SSH команду с правильными опциями"""
         info = self.stands[name]
-        
-        if name in self.STANDS:
-            opts = self.OLD_SSH_OPTS
-        else:
-            opts = self.NORMAL_SSH_OPTS
-        
-        if use_tty:
-            opts = "-tt " + opts
-        
+        opts = self.OLD_SSH_OPTS if name in self.STANDS else self.NORMAL_SSH_OPTS
+        if use_tty: opts = "-tt " + opts
         cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
-        
         try:
-            proc = subprocess.Popen(cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-                return proc.returncode, stdout or "", stderr or ""
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                stdout, stderr = proc.communicate()
-                return -1, stdout or "", "Таймаут подключения"
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+            return r.returncode, r.stdout or "", r.stderr or ""
+        except subprocess.TimeoutExpired:
+            return -1, "", "Таймаут подключения"
         except Exception as e:
             return -1, "", str(e)
 
@@ -133,39 +114,24 @@ class BenchConnector:
         if name not in self.stands: 
             return False, f"Стенд {name} не найден"
         info = self.stands[name]
-        if password is None: 
-            password = info.password
-        if not password:
-            return False, f"Нет пароля для стенда {name}"
+        if password is None: password = info.password
+        if not password: return False, f"Нет пароля для стенда {name}"
         
         if name in self.STANDS:
-            return self._connect_stand(name, info, password)
+            remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
+            code, stdout, stderr = self._ssh_command(name, remote_cmd, use_tty=True, timeout=20)
+            if 'OK' in stdout:
+                info.connected = True
+                return True, f"Подключен к {name}\n(su + qconn выполнены)"
+            if 'FAIL' in stdout:
+                return False, "Пароль SSH принят, но su или qconn не сработали."
+            return False, f"Ошибка подключения.\n\n{stdout[-200:]}\n\n{stderr[-200:]}"
         else:
-            return self._connect_orange(name, info, password)
-    
-    def _connect_stand(self, name, info, password):
-        """Подключение: SSH → su → qconn"""
-        remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-        code, stdout, stderr = self._ssh_command(name, remote_cmd, use_tty=True, timeout=20)
-        
-        if 'OK' in stdout:
-            info.connected = True
-            return True, f"Подключен к {name}\n(su + qconn выполнены)"
-        
-        if 'FAIL' in stdout:
-            return False, "Пароль SSH принят, но su или qconn не сработали."
-        elif 'Permission denied' in stdout or 'Permission denied' in stderr:
-            return False, "Неверный логин или пароль."
-        else:
-            return False, f"Ошибка подключения.\n\nSTDOUT:\n{stdout[-300:]}\n\nSTDERR:\n{stderr[-300:]}"
-    
-    def _connect_orange(self, name, info, password):
-        """Подключение к OrangePi"""
-        code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10)
-        if 'OK' in stdout:
-            info.connected = True
-            return True, f"Подключен к {name}"
-        return False, f"Ошибка:\n{stdout[-200:]}\n{stderr[-200:]}"
+            code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10)
+            if 'OK' in stdout:
+                info.connected = True
+                return True, f"Подключен к {name}"
+            return False, f"Ошибка:\n{stdout[-200:]}"
     
     def disconnect(self, name):
         if name in self.stands:
@@ -176,12 +142,7 @@ class BenchConnector:
             return False, "", "Нет подключения"
         info = self.stands[name]
         pwd = info.password
-        
-        if name in self.STANDS:
-            full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
-        else:
-            full_cmd = command
-        
+        full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'" if name in self.STANDS else command
         code, stdout, stderr = self._ssh_command(name, full_cmd, use_tty=True, timeout=timeout)
         return code == 0, stdout, stderr
     
@@ -226,7 +187,7 @@ def main():
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
             QLineEdit, QMessageBox, QFrame, QTreeWidget, QTreeWidgetItem
         )
-        from PyQt5.QtCore import Qt, QTimer
+        from PyQt5.QtCore import Qt, QTimer, pyqtSignal
         from PyQt5.QtGui import QPixmap, QIcon, QColor
         
         STAND_IMAGES = {
@@ -323,6 +284,21 @@ def main():
                     self.connect_btn.setEnabled(status == "online")
                     self.disconnect_btn.setEnabled(False)
         
+        # Класс окна с сигналом для фонового подключения
+        class MainWindow(QMainWindow):
+            connect_result = pyqtSignal(str, bool, str)
+            
+            def __init__(self):
+                super().__init__()
+                self.connect_result.connect(self.on_connect_result)
+            
+            def on_connect_result(self, name, ok, msg):
+                if ok:
+                    QMessageBox.information(self, "Успех", msg)
+                else:
+                    QMessageBox.critical(self, "Ошибка подключения", msg)
+                update_cards()
+        
         app = QApplication(sys.argv)
         logo_p = load_logo()
         if logo_p: app.setWindowIcon(QIcon(logo_p))
@@ -336,7 +312,7 @@ def main():
             QTabBar::tab:selected { background: #1e1e32; color: #a0b0ff; border-bottom: 3px solid #4a4ad2; }
         """)
         
-        window = QMainWindow()
+        window = MainWindow()
         window.setWindowTitle("Bench Manager Pro")
         window.setGeometry(50, 30, 1300, 850)
         central = QWidget()
@@ -391,12 +367,12 @@ def main():
                 return
             stand_cards[name].update_status("connecting", False)
             QApplication.processEvents()
-            ok, msg = bc.connect(name)
-            if ok:
-                QMessageBox.information(window, "Успех", msg)
-            else:
-                QMessageBox.critical(window, "Ошибка подключения", msg)
-            update_cards()
+            
+            def do_connect():
+                ok, msg = bc.connect(name)
+                window.connect_result.emit(name, ok, msg)
+            
+            threading.Thread(target=do_connect, daemon=True).start()
         
         def disconnect_stand(name):
             bc.disconnect(name)
@@ -439,7 +415,6 @@ def main():
         orange_layout.addStretch()
         refresh_op_btn = QPushButton("ОБНОВИТЬ СТАТУС")
         refresh_op_btn.setMaximumWidth(220)
-        refresh_op_btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
         refresh_op_btn.clicked.connect(update_cards)
         orange_layout.addWidget(refresh_op_btn, alignment=Qt.AlignCenter)
         tabs.addTab(orange_tab, "ORANGEPI")
@@ -463,18 +438,16 @@ def main():
         quick_row.addStretch()
         for path, label in [("/home/pkrv/CVS", "📁 CVS"), ("/tmp", "📁 /tmp"), ("/fead_hd", "📁 fead_hd")]:
             btn = QPushButton(label)
-            btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; background-color: #3a3a6a; } QPushButton:hover { background-color: #5a5a9a; }")
+            btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; background-color: #3a3a6a; }")
             btn.clicked.connect(lambda checked, p=path: (files_path.setText(p), browse_stand_files()))
             quick_row.addWidget(btn)
         quick_row.addStretch()
         files_layout.addLayout(quick_row)
         files_tree = QTreeWidget()
         files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-        files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
+        files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
         files_layout.addWidget(files_tree)
-        files_log = QTextEdit()
-        files_log.setReadOnly(True)
-        files_log.setMaximumHeight(50)
+        files_log = QTextEdit(); files_log.setReadOnly(True); files_log.setMaximumHeight(50)
         files_layout.addWidget(files_log)
         def browse_stand_files():
             name = files_stand.currentText()
@@ -494,10 +467,8 @@ def main():
                             if is_dir: item.setForeground(0, QColor("#61dafb"))
                             files_tree.addTopLevelItem(item)
                     files_log.append(f"[OK] {path}")
-                else:
-                    files_log.append(f"[ОШИБКА] {err}")
-            else:
-                files_log.append(f"[ОШИБКА] Стенд {name} не подключен")
+                else: files_log.append(f"[ОШИБКА] {err}")
+            else: files_log.append(f"Стенд {name} не подключен")
         def cd_stand_folder():
             item = files_tree.currentItem()
             if item and item.text(2) == "Папка":
@@ -505,46 +476,28 @@ def main():
                 browse_stand_files()
         def up_stand():
             cur = files_path.text().rstrip('/')
-            if cur != '/':
-                files_path.setText(os.path.dirname(cur) or '/')
-                browse_stand_files()
-        files_btn_row = QHBoxLayout()
-        files_btn_row.addStretch()
-        files_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_stand_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        files_btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_stand_folder, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        files_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_stand, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        files_btn_row.addStretch()
-        files_layout.addLayout(files_btn_row)
+            if cur != '/': files_path.setText(os.path.dirname(cur) or '/'); browse_stand_files()
+        btn_row = QHBoxLayout(); btn_row.addStretch()
+        btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_stand_files))
+        btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_stand_folder))
+        btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_stand))
+        btn_row.addStretch(); files_layout.addLayout(btn_row)
         tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
         
         # ФАЙЛЫ ORANGEPI
-        op_files_tab = QWidget()
-        op_files_layout = QVBoxLayout(op_files_tab)
-        op_files_sel = QHBoxLayout()
-        op_files_sel.addStretch()
-        op_files_sel.addWidget(QLabel("Стенд:"))
-        op_files_stand = QComboBox()
-        op_files_stand.addItems(["OrangePi"])
-        op_files_sel.addWidget(op_files_stand)
-        op_files_sel.addWidget(QLabel("Путь:"))
-        op_files_path = QLineEdit("/")
-        op_files_path.setMinimumWidth(350)
-        op_files_sel.addWidget(op_files_path)
-        op_files_sel.addStretch()
-        op_files_layout.addLayout(op_files_sel)
-        op_files_tree = QTreeWidget()
-        op_files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-        op_files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
-        op_files_layout.addWidget(op_files_tree)
-        op_files_log = QTextEdit()
-        op_files_log.setReadOnly(True)
-        op_files_log.setMaximumHeight(50)
-        op_files_layout.addWidget(op_files_log)
-        def browse_op_files():
-            name = op_files_stand.currentText()
-            path = op_files_path.text().strip() or "/"
+        op_tab = QWidget(); op_layout = QVBoxLayout(op_tab)
+        op_sel = QHBoxLayout(); op_sel.addStretch()
+        op_sel.addWidget(QLabel("Стенд:")); op_stand = QComboBox(); op_stand.addItems(["OrangePi"]); op_sel.addWidget(op_stand)
+        op_sel.addWidget(QLabel("Путь:")); op_path = QLineEdit("/"); op_path.setMinimumWidth(350); op_sel.addWidget(op_path)
+        op_sel.addStretch(); op_layout.addLayout(op_sel)
+        op_tree = QTreeWidget(); op_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
+        op_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
+        op_layout.addWidget(op_tree)
+        op_log = QTextEdit(); op_log.setReadOnly(True); op_log.setMaximumHeight(50); op_layout.addWidget(op_log)
+        def browse_op():
+            name = op_stand.currentText(); path = op_path.text().strip() or "/"
             if name in bc.stands and bc.stands[name].connected:
-                op_files_tree.clear()
+                op_tree.clear()
                 ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
                 if ok:
                     for line in out.split('\n'):
@@ -555,87 +508,59 @@ def main():
                             if fname in ['.', '..']: continue
                             is_dir = line.startswith('d')
                             item = QTreeWidgetItem([fname, parts[4] if not is_dir else "", "Папка" if is_dir else "Файл", f"{parts[5]} {parts[6]}" if len(parts)>6 else ""])
-                            if is_dir: item.setForeground(0, QColor("#61dafb"))
-                            op_files_tree.addTopLevelItem(item)
-                    op_files_log.append(f"[OK] {path}")
-                else:
-                    op_files_log.append(f"[ОШИБКА] {err}")
-            else:
-                op_files_log.append(f"[ОШИБКА] Стенд {name} не подключен")
-        def cd_op_folder():
-            item = op_files_tree.currentItem()
-            if item and item.text(2) == "Папка":
-                op_files_path.setText(f"{op_files_path.text().rstrip('/')}/{item.text(0)}")
-                browse_op_files()
-        def up_op():
-            cur = op_files_path.text().rstrip('/')
-            if cur != '/':
-                op_files_path.setText(os.path.dirname(cur) or '/')
-                browse_op_files()
-        op_btn_row = QHBoxLayout()
-        op_btn_row.addStretch()
-        op_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_op_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        op_btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_op_folder, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        op_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_op, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
-        op_btn_row.addStretch()
-        op_files_layout.addLayout(op_btn_row)
-        tabs.addTab(op_files_tab, "ФАЙЛЫ ORANGEPI")
+                            if is_dir: item.setForeground(0, QColor("#61dafb")); op_tree.addTopLevelItem(item)
+                    op_log.append(f"[OK] {path}")
+                else: op_log.append(f"[ОШИБКА] {err}")
+            else: op_log.append(f"Стенд {name} не подключен")
+        def cd_op(): 
+            item = op_tree.currentItem()
+            if item and item.text(2) == "Папка": op_path.setText(f"{op_path.text().rstrip('/')}/{item.text(0)}"); browse_op()
+        def up_op(): 
+            cur = op_path.text().rstrip('/')
+            if cur != '/': op_path.setText(os.path.dirname(cur) or '/'); browse_op()
+        op_btn = QHBoxLayout(); op_btn.addStretch()
+        op_btn.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_op))
+        op_btn.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_op))
+        op_btn.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_op))
+        op_btn.addStretch(); op_layout.addLayout(op_btn)
+        tabs.addTab(op_tab, "ФАЙЛЫ ORANGEPI")
         
         # ПРОЦЕССЫ
-        proc_tab = QWidget()
-        proc_layout = QVBoxLayout(proc_tab)
+        proc_tab = QWidget(); proc_layout = QVBoxLayout(proc_tab)
         proc_layout.addWidget(QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ", alignment=Qt.AlignCenter, styleSheet="color: #a0b0ff; font-size: 18px; font-weight: bold;"))
-        sel_row = QHBoxLayout()
-        sel_row.addStretch()
-        sel_row.addWidget(QLabel("Стенд:"))
-        proc_stand = QComboBox()
-        proc_stand.addItems(main_stands)
-        sel_row.addWidget(proc_stand)
-        sel_row.addStretch()
+        sel_row = QHBoxLayout(); sel_row.addStretch(); sel_row.addWidget(QLabel("Стенд:"))
+        proc_stand = QComboBox(); proc_stand.addItems(main_stands); sel_row.addWidget(proc_stand); sel_row.addStretch()
         proc_layout.addLayout(sel_row)
-        proc_log = QTextEdit()
-        proc_log.setReadOnly(True)
-        proc_log.setMaximumHeight(250)
-        proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 12px;")
+        proc_log = QTextEdit(); proc_log.setReadOnly(True); proc_log.setMaximumHeight(250)
+        proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas;")
         proc_layout.addWidget(proc_log)
         def log_proc(msg): proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        def start_1po2():
-            name = proc_stand.currentText()
-            if bc.stands[name].connected:
-                ok, out, err = bc.execute(name, "cd /home/pkrv/fpo_cfg && nohup ./1po2_1n > /dev/null 2>&1 & echo $!")
-                if ok: log_proc(f"{name}: 1po2_1n запущен (PID: {out.strip()})")
-                else: log_proc(f"{name}: Ошибка - {err}")
-            else: log_proc(f"{name}: Нет подключения")
-        def stop_1po2():
-            name = proc_stand.currentText()
-            if bc.stands[name].connected:
-                bc.execute(name, "pkill -f 1po2_1n; slay 1po2_1n 2>/dev/null")
-                log_proc(f"{name}: 1po2_1n остановлен")
-            else: log_proc(f"{name}: Нет подключения")
-        def restart_1po2(): stop_1po2(); time.sleep(1); start_1po2()
-        act_row = QHBoxLayout()
-        act_row.addStretch()
-        act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=start_1po2, styleSheet="QPushButton{background:#4caf50; font-size:13px; padding:10px 20px;}"))
-        act_row.addWidget(QPushButton("ОСТАНОВИТЬ", clicked=stop_1po2, styleSheet="QPushButton{background:#d24a4a; font-size:13px; padding:10px 20px;}"))
-        act_row.addWidget(QPushButton("ПЕРЕЗАПУСТИТЬ", clicked=restart_1po2, styleSheet="QPushButton{background:#ff9800; font-size:13px; padding:10px 20px;}"))
-        act_row.addStretch()
-        proc_layout.addLayout(act_row)
-        proc_layout.addStretch()
+        def start_1(): 
+            n = proc_stand.currentText()
+            if bc.stands[n].connected:
+                ok, out, err = bc.execute(n, "cd /home/pkrv/fpo_cfg && nohup ./1po2_1n > /dev/null 2>&1 & echo $!")
+                log_proc(f"{n}: {'запущен PID:'+out.strip() if ok else 'Ошибка - '+err}")
+            else: log_proc(f"{n}: Нет подключения")
+        def stop_1(): 
+            n = proc_stand.currentText()
+            if bc.stands[n].connected: bc.execute(n, "pkill -f 1po2_1n; slay 1po2_1n 2>/dev/null"); log_proc(f"{n}: остановлен")
+            else: log_proc(f"{n}: Нет подключения")
+        act_row = QHBoxLayout(); act_row.addStretch()
+        act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=start_1, styleSheet="background:#4caf50;"))
+        act_row.addWidget(QPushButton("ОСТАНОВИТЬ", clicked=stop_1, styleSheet="background:#d24a4a;"))
+        act_row.addWidget(QPushButton("ПЕРЕЗАПУСТИТЬ", clicked=lambda: (stop_1(), time.sleep(1), start_1()), styleSheet="background:#ff9800;"))
+        act_row.addStretch(); proc_layout.addLayout(act_row); proc_layout.addStretch()
         tabs.addTab(proc_tab, "ПРОЦЕССЫ")
         
         # ЛОГИ
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
-        log_text = QTextEdit()
-        log_text.setReadOnly(True)
-        log_text.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 12px;")
+        log_tab = QWidget(); log_layout = QVBoxLayout(log_tab)
+        log_text = QTextEdit(); log_text.setReadOnly(True)
+        log_text.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas;")
         log_layout.addWidget(log_text)
         log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: log_text.clear()))
         tabs.addTab(log_tab, "ЛОГИ")
         
-        timer = QTimer()
-        timer.timeout.connect(update_cards)
-        timer.start(3000)
+        timer = QTimer(); timer.timeout.connect(update_cards); timer.start(3000)
         QTimer.singleShot(500, update_cards)
         
         window.show()
