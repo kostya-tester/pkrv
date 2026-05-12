@@ -53,7 +53,7 @@ class LogManager:
     def warning(self, msg): self._write("WARNING", msg)
 
 # ============================================================
-# КОННЕКТОР СТЕНДОВ (SSH → su → qconn)
+# КОННЕКТОР СТЕНДОВ
 # ============================================================
 
 class StandInfo:
@@ -76,12 +76,12 @@ class StandInfo:
 
 class BenchConnector:
     STANDS = {
-        "ГОЗ": {"ip": "192.168.243.248", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "need_su": True},
-        "Арктика": {"ip": "192.168.243.249", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "need_su": True},
-        "C1M": {"ip": "192.168.243.254", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "need_su": True},
+        "ГОЗ": {"ip": "192.168.243.248", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
+        "Арктика": {"ip": "192.168.243.249", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
+        "C1M": {"ip": "192.168.243.254", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
     }
     
-    ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi", "need_su": False}
+    ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
     def __init__(self):
         self.logger = LogManager()
@@ -92,7 +92,7 @@ class BenchConnector:
     def _init_stands(self):
         for name, cfg in self.STANDS.items():
             self.stands[name] = StandInfo(name, cfg['ip'], cfg['username'], cfg.get('password', ''), cfg.get('type', ''))
-        self.stands["OrangePi"] = StandInfo("OrangePi", self.ORANGEPI['ip'], self.ORANGEPI['username'], 
+        self.stands["OrangePi"] = StandInfo("OrangePi", self.ORANGEPI['ip'], self.ORANGEPI['username'],
                                              self.ORANGEPI.get('password', ''), self.ORANGEPI.get('type', ''))
     
     def check_availability(self, ip):
@@ -123,7 +123,7 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def connect(self, name, password=None):
-        """Подключение: SSH → su → qconn для основных стендов"""
+        """Подключение к стенду"""
         if name not in self.stands: return False
         info = self.stands[name]
         if password is None: password = info.password
@@ -132,7 +132,7 @@ class BenchConnector:
         self.logger.info(f"Подключение к {name} ({info.username}@{info.ip})...")
         
         if name in self.STANDS:
-            return self._connect_with_su_qconn(name, info, password)
+            return self._connect_with_su(name, info, password)
         else:
             return self._connect_simple(name, info, password)
     
@@ -140,7 +140,7 @@ class BenchConnector:
         """Обычное SSH подключение (OrangePi)"""
         try:
             if os.name == 'nt':
-                cmd = f'echo {password} | ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
+                cmd = f'ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
             else:
                 cmd = f"sshpass -p '{password}' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} 'echo OK'"
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
@@ -151,29 +151,26 @@ class BenchConnector:
             return False
         except: return False
     
-    def _connect_with_su_qconn(self, name, info, password):
-        """SSH → su (zxcv) → qconn для ГОЗ/Арктика/C1M"""
+    def _connect_with_su(self, name, info, password):
+        """SSH → su → qconn для ГОЗ/Арктика/C1M"""
         try:
-            # Используем expect-подобный подход через ssh -tt
-            remote_script = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-            
             if os.name == 'nt':
-                cmd = f'echo {password} | ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5 {info.username}@{info.ip} "{remote_script}"'
+                remote_cmd = f"echo {password} | su -c 'qconn && ls /home/pkrv/CVS > /dev/null && echo OK || echo FAIL'"
+                cmd = f'ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=10 {info.username}@{info.ip} "{remote_cmd}"'
             else:
-                cmd = f"sshpass -p '{password}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 {info.username}@{info.ip} '{remote_script}'"
+                remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null && echo OK || echo FAIL'"
+                cmd = f"sshpass -p '{password}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 {info.username}@{info.ip} '{remote_cmd}'"
             
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
             
             if 'OK' in result.stdout:
                 info.connected = True
-                self.logger.info(f"Подключен к {name} (su + qconn выполнены)")
+                self.logger.info(f"Подключен к {name} (su + qconn)")
                 return True
             else:
-                self.logger.error(f"Ошибка подключения к {name}: {result.stdout.strip()[-100:]}")
+                self.logger.error(f"Ошибка подключения к {name}")
                 return False
-        except Exception as e:
-            self.logger.error(f"Ошибка подключения к {name}: {e}")
-            return False
+        except: return False
     
     def disconnect(self, name):
         if name in self.stands:
@@ -187,12 +184,12 @@ class BenchConnector:
         pwd = info.password
         
         if name in self.STANDS:
-            full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
+            full_cmd = f"echo {pwd} | su -c 'qconn && {command}'"
         else:
             full_cmd = command
         
         if os.name == 'nt':
-            cmd = f'echo {pwd} | ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL {info.username}@{info.ip} "{full_cmd}"'
+            cmd = f'ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL {info.username}@{info.ip} "{full_cmd}"'
         else:
             cmd = f"sshpass -p '{pwd}' ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {info.username}@{info.ip} '{full_cmd}'"
         
@@ -200,9 +197,6 @@ class BenchConnector:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
             return r.returncode == 0, r.stdout, r.stderr
         except: return False, "", "Ошибка"
-    
-    def get_cvs_contents(self, name):
-        return self.execute(name, "ls -la /home/pkrv/CVS")
     
     def get_all_info(self):
         return {name: s.to_dict() for name, s in self.stands.items()}
@@ -245,14 +239,14 @@ def main():
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
-            QLineEdit, QMessageBox, QFrame, QGridLayout, QScrollArea, 
+            QLineEdit, QMessageBox, QFrame, QGridLayout, QScrollArea,
             QTreeWidget, QTreeWidgetItem
         )
         from PyQt5.QtCore import Qt, QTimer
         from PyQt5.QtGui import QPixmap, QIcon, QColor
         
         # ============================================================
-        # КАРТИНКИ
+        # КАРТИНКИ (УВЕЛИЧЕННЫЕ)
         # ============================================================
         
         STAND_IMAGES = {
@@ -260,7 +254,7 @@ def main():
             "C1M": "c1m.png", "OrangePi": "orangepi.png"
         }
         
-        def load_pixmap(name, width=200, height=130):
+        def load_pixmap(name, width=300, height=200):
             paths = [
                 os.path.join(IMAGES_DIR, name),
                 os.path.join(BASE_DIR, "gui", "images", name),
@@ -274,7 +268,7 @@ def main():
             pix.fill(QColor("#2a2a4a"))
             return pix
         
-        def load_logo(width=170, height=50):
+        def load_logo(width=200, height=60):
             paths = [os.path.join(IMAGES_DIR, "logo.png"), os.path.join(BASE_DIR, "gui", "images", "logo.png")]
             for p in paths:
                 if os.path.exists(p):
@@ -284,61 +278,71 @@ def main():
             return None
         
         # ============================================================
-        # КАРТОЧКА СТЕНДА (с кнопками внутри)
+        # КАРТОЧКА СТЕНДА (УВЕЛИЧЕННАЯ)
         # ============================================================
         
         class StandCard(QFrame):
             def __init__(self, name, ip, username, stand_type):
                 super().__init__()
                 self.stand_name = name
-                self.setMinimumSize(240, 420)
-                self.setMaximumSize(300, 460)
-                self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 12px; }")
+                self.setMinimumSize(340, 520)
+                self.setMaximumSize(420, 580)
+                self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 15px; }")
                 
                 layout = QVBoxLayout(self)
-                layout.setSpacing(5)
+                layout.setSpacing(8)
+                layout.setContentsMargins(15, 15, 15, 15)
                 
+                # Картинка (увеличенная)
                 img_name = STAND_IMAGES.get(name, "logo.png")
                 img_label = QLabel()
-                img_label.setPixmap(load_pixmap(img_name, 210, 130))
+                img_label.setPixmap(load_pixmap(img_name, 300, 200))
                 img_label.setAlignment(Qt.AlignCenter)
                 img_label.setStyleSheet("background: transparent; border: none;")
                 layout.addWidget(img_label)
                 
+                # Название
                 name_lbl = QLabel(name)
-                name_lbl.setStyleSheet("color: #cdd6f4; font-size: 16px; font-weight: bold; background: transparent;")
+                name_lbl.setStyleSheet("color: #cdd6f4; font-size: 20px; font-weight: bold; background: transparent;")
                 name_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(name_lbl)
                 
+                # IP
                 ip_lbl = QLabel(f"{username}@{ip}")
-                ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 10px; background: transparent;")
+                ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 12px; background: transparent;")
                 ip_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(ip_lbl)
                 
+                # Тип
                 if stand_type:
                     type_lbl = QLabel(stand_type)
-                    type_lbl.setStyleSheet("color: #6a6aaa; font-size: 9px; background: transparent;")
+                    type_lbl.setStyleSheet("color: #6a6aaa; font-size: 10px; background: transparent;")
                     type_lbl.setAlignment(Qt.AlignCenter)
                     layout.addWidget(type_lbl)
                 
+                # Статус
                 self.status_lbl = QLabel("OFFLINE")
-                self.status_lbl.setStyleSheet("color: #f44336; font-size: 12px; font-weight: bold; background: transparent;")
+                self.status_lbl.setStyleSheet("color: #f44336; font-size: 14px; font-weight: bold; background: transparent;")
                 self.status_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.status_lbl)
                 
+                # Индикатор
                 self.indicator = QLabel("●")
-                self.indicator.setStyleSheet("color: #f44336; font-size: 12px; background: transparent;")
+                self.indicator.setStyleSheet("color: #f44336; font-size: 16px; background: transparent;")
                 self.indicator.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.indicator)
                 
-                layout.addSpacing(8)
+                layout.addSpacing(10)
                 
+                # Кнопки
                 self.connect_btn = QPushButton("ПОДКЛЮЧИТЬ")
-                self.connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 10px; padding: 6px; } QPushButton:hover { background-color: #66bb6a; }")
+                self.connect_btn.setMinimumHeight(35)
+                self.connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #66bb6a; }")
                 layout.addWidget(self.connect_btn)
                 
                 self.disconnect_btn = QPushButton("ОТКЛЮЧИТЬ")
-                self.disconnect_btn.setStyleSheet("QPushButton { background-color: #d24a4a; font-size: 10px; padding: 6px; } QPushButton:hover { background-color: #e25a5a; }")
+                self.disconnect_btn.setMinimumHeight(35)
+                self.disconnect_btn.setStyleSheet("QPushButton { background-color: #d24a4a; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #e25a5a; }")
                 self.disconnect_btn.setEnabled(False)
                 layout.addWidget(self.disconnect_btn)
                 
@@ -347,21 +351,21 @@ def main():
             def update_status(self, status, connected):
                 if status == "online":
                     self.status_lbl.setText("ONLINE")
-                    self.status_lbl.setStyleSheet("color: #4caf50; font-size: 12px; font-weight: bold; background: transparent;")
-                    self.indicator.setStyleSheet("color: #4caf50; font-size: 12px; background: transparent;")
+                    self.status_lbl.setStyleSheet("color: #4caf50; font-size: 14px; font-weight: bold; background: transparent;")
+                    self.indicator.setStyleSheet("color: #4caf50; font-size: 16px; background: transparent;")
                     border = "#4caf50" if connected else "#ff9800"
-                    self.setStyleSheet(f"QFrame {{ background-color: #252545; border: 2px solid {border}; border-radius: 12px; }}")
+                    self.setStyleSheet(f"QFrame {{ background-color: #252545; border: 3px solid {border}; border-radius: 15px; }}")
                     self.connect_btn.setEnabled(not connected)
                     self.disconnect_btn.setEnabled(connected)
                 elif status == "connecting":
                     self.status_lbl.setText("CONNECTING...")
-                    self.status_lbl.setStyleSheet("color: #ff9800; font-size: 12px; font-weight: bold; background: transparent;")
-                    self.indicator.setStyleSheet("color: #ff9800; font-size: 12px; background: transparent;")
+                    self.status_lbl.setStyleSheet("color: #ff9800; font-size: 14px; font-weight: bold; background: transparent;")
+                    self.indicator.setStyleSheet("color: #ff9800; font-size: 16px; background: transparent;")
                 else:
                     self.status_lbl.setText("OFFLINE")
-                    self.status_lbl.setStyleSheet("color: #f44336; font-size: 12px; font-weight: bold; background: transparent;")
-                    self.indicator.setStyleSheet("color: #f44336; font-size: 12px; background: transparent;")
-                    self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 12px; }")
+                    self.status_lbl.setStyleSheet("color: #f44336; font-size: 14px; font-weight: bold; background: transparent;")
+                    self.indicator.setStyleSheet("color: #f44336; font-size: 16px; background: transparent;")
+                    self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 15px; }")
                     self.connect_btn.setEnabled(status == "online")
                     self.disconnect_btn.setEnabled(False)
         
@@ -374,33 +378,35 @@ def main():
         if logo_p: app.setWindowIcon(QIcon(logo_p))
         
         app.setStyleSheet("""
-            QWidget { background-color: #1a1a2e; color: #e0e0e0; font-size: 12px; }
-            QPushButton { background-color: #4a4ad2; color: white; border: none; border-radius: 5px; padding: 8px 14px; font-weight: bold; }
+            QWidget { background-color: #1a1a2e; color: #e0e0e0; font-size: 13px; }
+            QPushButton { background-color: #4a4ad2; color: white; border: none; border-radius: 6px; padding: 10px 18px; font-weight: bold; }
             QPushButton:hover { background-color: #5a5ae2; }
-            QTabWidget::pane { border: 1px solid #3a3a6a; border-radius: 5px; background: #1e1e32; }
-            QTabBar::tab { background: #2a2a4a; color: #8a8aaa; padding: 10px 25px; font-weight: bold; font-size: 13px; min-width: 120px; }
+            QTabWidget::pane { border: 1px solid #3a3a6a; border-radius: 8px; background: #1e1e32; }
+            QTabBar::tab { background: #2a2a4a; color: #8a8aaa; padding: 12px 30px; font-weight: bold; font-size: 14px; min-width: 140px; }
             QTabBar::tab:selected { background: #1e1e32; color: #a0b0ff; border-bottom: 3px solid #4a4ad2; }
         """)
         
         window = QMainWindow()
         window.setWindowTitle("Bench Manager Pro")
-        window.setGeometry(100, 50, 900, 700)
+        window.setGeometry(50, 30, 1300, 850)
         
         central = QWidget()
         window.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setSpacing(8)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(15, 15, 15, 15)
         
         # ============================================================
         # HEADER (БЕЛЫЙ)
         # ============================================================
         header = QFrame()
-        header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 10px; }")
-        header.setFixedHeight(60)
+        header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
+        header.setFixedHeight(70)
         header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 10, 20, 10)
         
         logo_header = QLabel()
-        lp = load_logo()
+        lp = load_logo(200, 55)
         if lp: logo_header.setPixmap(lp)
         else: logo_header.setText("BENCH MANAGER")
         logo_header.setStyleSheet("background: transparent;")
@@ -408,12 +414,12 @@ def main():
         header_layout.addStretch()
         
         title_lbl = QLabel("BENCH MANAGER PRO")
-        title_lbl.setStyleSheet("color: #1a1a4a; font-size: 20px; font-weight: bold; background: transparent;")
+        title_lbl.setStyleSheet("color: #1a1a4a; font-size: 22px; font-weight: bold; background: transparent; letter-spacing: 3px;")
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
         
         self_status = QLabel("ЗАГРУЗКА...")
-        self_status.setStyleSheet("color: #666; font-size: 11px; font-weight: bold; background: transparent;")
+        self_status.setStyleSheet("color: #666; font-size: 12px; font-weight: bold; background: transparent;")
         header_layout.addWidget(self_status)
         
         main_layout.addWidget(header)
@@ -427,7 +433,7 @@ def main():
         stand_cards = {}
         main_stands = ["ГОЗ", "Арктика", "C1M"]
         
-        # Общие функции (объявляем ДО использования)
+        # Общие функции
         def update_cards():
             for name, card in stand_cards.items():
                 if name in bc.stands:
@@ -445,7 +451,7 @@ def main():
             stand_cards[name].update_status("connecting", False)
             QApplication.processEvents()
             if bc.connect(name):
-                QMessageBox.information(window, "Успех", f"Подключен к {name}")
+                QMessageBox.information(window, "Успех", f"Подключен к {name}\n(выполнено: su + qconn)")
             else:
                 QMessageBox.critical(window, "Ошибка", f"Не удалось подключиться к {name}")
             update_cards()
@@ -463,23 +469,26 @@ def main():
         scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         
         cards_widget = QWidget()
-        cards_grid = QGridLayout(cards_widget)
-        cards_grid.setSpacing(15)
+        cards_grid = QHBoxLayout(cards_widget)
+        cards_grid.setSpacing(20)
+        cards_grid.setContentsMargins(10, 10, 10, 10)
         
-        for i, name in enumerate(main_stands):
+        for name in main_stands:
             info = bc.stands[name]
             card = StandCard(name, info.ip, info.username, info.stand_type)
-            cards_grid.addWidget(card, 0, i, Qt.AlignCenter)
+            cards_grid.addWidget(card)
             stand_cards[name] = card
             card.connect_btn.clicked.connect(lambda checked, n=name: connect_stand(n))
             card.disconnect_btn.clicked.connect(lambda checked, n=name: disconnect_stand(n))
+        
+        cards_grid.addStretch()
         
         scroll.setWidget(cards_widget)
         stands_layout.addWidget(scroll)
         
         refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
-        refresh_btn.setMaximumWidth(200)
-        refresh_btn.setStyleSheet("QPushButton { font-size: 10px; padding: 5px 10px; }")
+        refresh_btn.setMaximumWidth(220)
+        refresh_btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
         refresh_btn.clicked.connect(update_cards)
         stands_layout.addWidget(refresh_btn, alignment=Qt.AlignCenter)
         
@@ -490,7 +499,7 @@ def main():
         orange_layout = QVBoxLayout(orange_tab)
         
         orange_title = QLabel("OrangePi")
-        orange_title.setStyleSheet("color: #a0b0ff; font-size: 16px; font-weight: bold;")
+        orange_title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
         orange_title.setAlignment(Qt.AlignCenter)
         orange_layout.addWidget(orange_title)
         
@@ -504,8 +513,8 @@ def main():
         orange_layout.addStretch()
         
         refresh_op_btn = QPushButton("ОБНОВИТЬ СТАТУС")
-        refresh_op_btn.setMaximumWidth(200)
-        refresh_op_btn.setStyleSheet("QPushButton { font-size: 10px; padding: 5px 10px; }")
+        refresh_op_btn.setMaximumWidth(220)
+        refresh_op_btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
         refresh_op_btn.clicked.connect(update_cards)
         orange_layout.addWidget(refresh_op_btn, alignment=Qt.AlignCenter)
         
@@ -516,7 +525,7 @@ def main():
         proc_layout = QVBoxLayout(proc_tab)
         
         proc_title = QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ")
-        proc_title.setStyleSheet("color: #a0b0ff; font-size: 16px; font-weight: bold;")
+        proc_title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
         proc_title.setAlignment(Qt.AlignCenter)
         proc_layout.addWidget(proc_title)
         
@@ -525,6 +534,7 @@ def main():
         sel_row.addWidget(QLabel("Стенд:"))
         proc_stand = QComboBox()
         proc_stand.addItems(main_stands)
+        proc_stand.setMinimumWidth(180)
         sel_row.addWidget(proc_stand)
         sel_row.addStretch()
         proc_layout.addLayout(sel_row)
@@ -532,7 +542,7 @@ def main():
         proc_log = QTextEdit()
         proc_log.setReadOnly(True)
         proc_log.setMaximumHeight(250)
-        proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 11px;")
+        proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 12px;")
         proc_layout.addWidget(proc_log)
         
         def log_proc(msg):
@@ -560,9 +570,9 @@ def main():
         
         act_row = QHBoxLayout()
         act_row.addStretch()
-        act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=start_1po2, styleSheet="QPushButton{background:#4caf50;}"))
-        act_row.addWidget(QPushButton("ОСТАНОВИТЬ", clicked=stop_1po2, styleSheet="QPushButton{background:#d24a4a;}"))
-        act_row.addWidget(QPushButton("ПЕРЕЗАПУСТИТЬ", clicked=restart_1po2, styleSheet="QPushButton{background:#ff9800;}"))
+        act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=start_1po2, styleSheet="QPushButton{background:#4caf50; font-size:13px; padding:10px 20px;}"))
+        act_row.addWidget(QPushButton("ОСТАНОВИТЬ", clicked=stop_1po2, styleSheet="QPushButton{background:#d24a4a; font-size:13px; padding:10px 20px;}"))
+        act_row.addWidget(QPushButton("ПЕРЕЗАПУСТИТЬ", clicked=restart_1po2, styleSheet="QPushButton{background:#ff9800; font-size:13px; padding:10px 20px;}"))
         act_row.addStretch()
         proc_layout.addLayout(act_row)
         proc_layout.addStretch()
@@ -574,7 +584,7 @@ def main():
         board_layout = QVBoxLayout(board_tab)
         
         board_title = QLabel("ПРОСМОТР ФАЙЛОВ НА ПЛАТЕ")
-        board_title.setStyleSheet("color: #a0b0ff; font-size: 16px; font-weight: bold;")
+        board_title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
         board_title.setAlignment(Qt.AlignCenter)
         board_layout.addWidget(board_title)
         
@@ -583,16 +593,18 @@ def main():
         board_sel.addWidget(QLabel("Стенд:"))
         board_stand = QComboBox()
         board_stand.addItems(main_stands + ["OrangePi"])
+        board_stand.setMinimumWidth(180)
         board_sel.addWidget(board_stand)
         board_sel.addWidget(QLabel("Путь:"))
         board_path = QLineEdit("/home/pkrv/CVS")
+        board_path.setMinimumWidth(350)
         board_sel.addWidget(board_path)
         board_sel.addStretch()
         board_layout.addLayout(board_sel)
         
         board_tree = QTreeWidget()
         board_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-        board_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 5px; }")
+        board_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; font-size: 12px; } QTreeWidget::item { padding: 5px; } QTreeWidget::item:hover { background: #3a3a6a; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; font-size: 12px; }")
         board_layout.addWidget(board_tree)
         
         board_log = QTextEdit()
@@ -635,9 +647,9 @@ def main():
         
         board_btn_row = QHBoxLayout()
         board_btn_row.addStretch()
-        board_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_files))
-        board_btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_folder))
-        board_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=go_up))
+        board_btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_files, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+        board_btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_folder, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
+        board_btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=go_up, styleSheet="QPushButton{font-size:13px; padding:10px 20px;}"))
         board_btn_row.addStretch()
         board_layout.addLayout(board_btn_row)
         
@@ -648,12 +660,12 @@ def main():
         log_layout = QVBoxLayout(log_tab)
         log_text = QTextEdit()
         log_text.setReadOnly(True)
-        log_text.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 11px;")
+        log_text.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas; font-size: 12px;")
         log_layout.addWidget(log_text)
         log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: log_text.clear()))
         tabs.addTab(log_tab, "ЛОГИ")
         
-        # Таймеры и автостарт
+        # Таймеры
         timer = QTimer()
         timer.timeout.connect(update_cards)
         timer.start(3000)
