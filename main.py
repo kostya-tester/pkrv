@@ -1,6 +1,6 @@
 """
-Bench Manager - полностью автономный файл.
-Не требует импорта из папок core/, logger/, gui/.
+Bench Manager - полностью автономный файл с GUI и картинками.
+Без зависаний при запуске.
 """
 
 import sys
@@ -9,13 +9,22 @@ import time
 import socket
 import threading
 import subprocess
-import hashlib
-import tempfile
-import shutil
-import getpass
 import argparse
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from datetime import datetime
+
+# ============================================================
+# ПУТИ
+# ============================================================
+
+if getattr(sys, 'frozen', False):
+    BASE_DIR = sys._MEIPASS
+    APP_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    APP_DIR = BASE_DIR
+
+IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
 
 # ============================================================
 # ВСТРОЕННЫЙ ЛОГГЕР
@@ -28,8 +37,10 @@ class LogManager:
     def setup(self, level="INFO", log_file=None):
         self.log_level = level
         if log_file:
-            os.makedirs(os.path.dirname(log_file), exist_ok=True)
-            self.log_file = log_file
+            try:
+                os.makedirs(os.path.dirname(log_file), exist_ok=True)
+                self.log_file = log_file
+            except: pass
     def _write(self, level, msg):
         text = f"[{datetime.now().strftime('%H:%M:%S')}] [{level}] {msg}"
         print(text)
@@ -45,43 +56,44 @@ class LogManager:
         if self.log_level == "DEBUG": self._write("DEBUG", msg)
 
 # ============================================================
-# КОННЕКТОР СТЕНДОВ
+# КОННЕКТОР СТЕНДОВ (без getpass в GUI)
 # ============================================================
 
 class StandInfo:
-    def __init__(self, name, ip, username="pkrv"):
+    def __init__(self, name, ip, username="pkrv", stand_type=""):
         self.name = name
         self.ip = ip
         self.username = username
         self.status = "offline"
         self.connected = False
         self.last_check = None
+        self.stand_type = stand_type
     def to_dict(self):
         return {
             'name': self.name, 'ip': self.ip, 'username': self.username,
             'status': self.status, 'connected': self.connected,
+            'type': self.stand_type,
             'last_check': self.last_check.strftime('%H:%M:%S') if self.last_check else 'Никогда'
         }
 
 class BenchConnector:
     STANDS = {
-        "ГОЗ": {"ip": "192.168.243.248", "username": "pkrv"},
-        "Арктика": {"ip": "192.168.243.249", "username": "pkrv"},
-        "C1M": {"ip": "192.168.243.254", "username": "pkrv"},
-        "OrangePi": {"ip": "192.168.243.46", "username": "orangepi"}
+        "ГОЗ": {"ip": "192.168.243.248", "username": "pkrv", "type": "Основной стенд"},
+        "Арктика": {"ip": "192.168.243.249", "username": "pkrv", "type": "Основной стенд"},
+        "C1M": {"ip": "192.168.243.254", "username": "pkrv", "type": "Основной стенд"},
+        "OrangePi": {"ip": "192.168.243.46", "username": "orangepi", "type": "Orange Pi"}
     }
     
     def __init__(self):
         self.logger = LogManager()
         self.stands = {}
-        self.connections = {}
         self.passwords = {}
         self.monitoring = False
         self._init_stands()
     
     def _init_stands(self):
         for name, cfg in self.STANDS.items():
-            self.stands[name] = StandInfo(name, cfg['ip'], cfg['username'])
+            self.stands[name] = StandInfo(name, cfg['ip'], cfg['username'], cfg.get('type', ''))
     
     def check_availability(self, ip):
         try:
@@ -93,38 +105,33 @@ class BenchConnector:
         except: return False
     
     def start_monitoring(self):
+        if self.monitoring: return
         self.monitoring = True
         def loop():
             while self.monitoring:
                 for name, info in self.stands.items():
                     info.last_check = datetime.now()
-                    was = info.status
                     if self.check_availability(info.ip):
                         info.status = "online"
                     else:
                         info.status = "offline"
                         info.connected = False
                 time.sleep(5)
-        threading.Thread(target=loop, daemon=True).start()
+        t = threading.Thread(target=loop, daemon=True)
+        t.start()
         self.logger.info("Мониторинг запущен")
     
     def stop_monitoring(self): self.monitoring = False
     
-    def connect(self, name, password=None):
+    def connect(self, name, password):
+        """Подключение с паролем (без getpass)"""
         if name not in self.stands: return False
         info = self.stands[name]
-        if password is None:
-            password = getpass.getpass(f"Пароль для {name} ({info.username}@{info.ip}): ")
-        
-        # Подключение через системный ssh
         try:
-            # Проверяем пароль
-            cmd = f'ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
-            env = os.environ.copy()
-            if os.name == 'nt':  # Windows
-                # Используем plink или встроенный ssh
-                pass
-            
+            if os.name == 'nt':
+                cmd = f'echo {password} | ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
+            else:
+                cmd = f'sshpass -p {password} ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 {info.username}@{info.ip} "echo OK"'
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
             if 'OK' in result.stdout:
                 info.connected = True
@@ -134,17 +141,20 @@ class BenchConnector:
         except: pass
         return False
     
+    def disconnect(self, name):
+        if name in self.stands:
+            self.stands[name].connected = False
+            self.logger.info(f"Отключен от {name}")
+    
     def execute(self, name, command, timeout=30):
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
         pwd = self.passwords.get(name, "")
-        
         if os.name == 'nt':
             cmd = f'echo {pwd} | ssh -o StrictHostKeyChecking=no {info.username}@{info.ip} "{command}"'
         else:
             cmd = f'sshpass -p {pwd} ssh -o StrictHostKeyChecking=no {info.username}@{info.ip} "{command}"'
-        
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
             return r.returncode == 0, r.stdout, r.stderr
@@ -173,9 +183,6 @@ def main():
     
     if args.check:
         time.sleep(3)
-        print("=" * 50)
-        print("СТАТУС СТЕНДОВ")
-        print("=" * 50)
         for name, info in bc.get_all_info().items():
             s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
             print(f"  {name:12} | {info['ip']:16} | {s}")
@@ -184,86 +191,316 @@ def main():
     
     if args.console:
         time.sleep(3)
-        print("=" * 50)
-        print("КОНСОЛЬНЫЙ РЕЖИМ")
-        print("=" * 50)
+        import getpass
         for name, info in bc.get_all_info().items():
             s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
             print(f"  {name} ({info['ip']}): {s}")
-        print("\nКоманды:")
-        print("  bc.connect('ГОЗ')")
-        print("  bc.execute('ГОЗ', 'ls -la')")
+        print("\nКоманды: bc.connect('ГОЗ', 'пароль'), bc.execute('ГОЗ', 'ls')")
         import code
         code.interact(local={'bc': bc})
         bc.stop_monitoring()
         return
     
-    # GUI - пробуем загрузить PyQt5
+    # ============================================================
+    # GUI
+    # ============================================================
     try:
-        from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QHBoxLayout, QMessageBox, QInputDialog, QProgressBar
+        from PyQt5.QtWidgets import (
+            QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
+            QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
+            QLineEdit, QGroupBox, QMessageBox, QInputDialog,
+            QFrame, QGridLayout, QScrollArea
+        )
         from PyQt5.QtCore import Qt, QTimer
-        from PyQt5.QtGui import QFont, QColor
+        from PyQt5.QtGui import QPixmap, QIcon, QColor
+        
+        # ============================================================
+        # КАРТИНКИ
+        # ============================================================
+        
+        STAND_IMAGES = {
+            "ГОЗ": "goz.png",
+            "Арктика": "arktika.png",
+            "C1M": "c1m.png",
+            "OrangePi": "orangepi.png"
+        }
+        
+        def load_pixmap(name, width=200, height=130):
+            path = os.path.join(IMAGES_DIR, name)
+            if os.path.exists(path):
+                pix = QPixmap(path)
+                if not pix.isNull():
+                    return pix.scaled(width, height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pix = QPixmap(width, height)
+            pix.fill(QColor("#2a2a4a"))
+            return pix
+        
+        # ============================================================
+        # КАРТОЧКА СТЕНДА
+        # ============================================================
+        
+        class StandCard(QFrame):
+            def __init__(self, name, ip, username, stand_type):
+                super().__init__()
+                self.stand_name = name
+                self.setMinimumSize(220, 320)
+                self.setMaximumSize(260, 380)
+                self.setStyleSheet("""
+                    QFrame {
+                        background-color: #252545;
+                        border: 2px solid #3a3a6a;
+                        border-radius: 12px;
+                        padding: 8px;
+                    }
+                """)
+                
+                layout = QVBoxLayout(self)
+                layout.setSpacing(6)
+                
+                img_name = STAND_IMAGES.get(name, "logo.png")
+                img_label = QLabel()
+                img_label.setPixmap(load_pixmap(img_name, 200, 120))
+                img_label.setAlignment(Qt.AlignCenter)
+                img_label.setStyleSheet("background: transparent; border: none;")
+                layout.addWidget(img_label)
+                
+                name_lbl = QLabel(name)
+                name_lbl.setStyleSheet("color: #cdd6f4; font-size: 15px; font-weight: bold; background: transparent;")
+                name_lbl.setAlignment(Qt.AlignCenter)
+                layout.addWidget(name_lbl)
+                
+                ip_lbl = QLabel(f"{username}@{ip}")
+                ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 10px; background: transparent;")
+                ip_lbl.setAlignment(Qt.AlignCenter)
+                layout.addWidget(ip_lbl)
+                
+                if stand_type:
+                    type_lbl = QLabel(stand_type)
+                    type_lbl.setStyleSheet("color: #6a6aaa; font-size: 9px; background: transparent;")
+                    type_lbl.setAlignment(Qt.AlignCenter)
+                    layout.addWidget(type_lbl)
+                
+                self.status_lbl = QLabel("OFFLINE")
+                self.status_lbl.setStyleSheet("color: #f44336; font-size: 12px; font-weight: bold; background: transparent;")
+                self.status_lbl.setAlignment(Qt.AlignCenter)
+                layout.addWidget(self.status_lbl)
+                
+                self.indicator = QLabel("⬤")
+                self.indicator.setStyleSheet("color: #f44336; font-size: 10px; background: transparent;")
+                self.indicator.setAlignment(Qt.AlignCenter)
+                layout.addWidget(self.indicator)
+                
+                layout.addStretch()
+            
+            def update_status(self, status, connected):
+                if status == "online":
+                    self.status_lbl.setText("ONLINE")
+                    self.status_lbl.setStyleSheet("color: #4caf50; font-size: 12px; font-weight: bold; background: transparent;")
+                    self.indicator.setStyleSheet("color: #4caf50; font-size: 10px; background: transparent;")
+                    if connected:
+                        self.setStyleSheet("QFrame { background-color: #253545; border: 2px solid #4caf50; border-radius: 12px; }")
+                    else:
+                        self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #4caf50; border-radius: 12px; }")
+                else:
+                    self.status_lbl.setText("OFFLINE")
+                    self.status_lbl.setStyleSheet("color: #f44336; font-size: 12px; font-weight: bold; background: transparent;")
+                    self.indicator.setStyleSheet("color: #f44336; font-size: 10px; background: transparent;")
+                    self.setStyleSheet("QFrame { background-color: #252545; border: 2px solid #3a3a6a; border-radius: 12px; }")
+        
+        # ============================================================
+        # ОКНО
+        # ============================================================
         
         app = QApplication(sys.argv)
-        app.setStyleSheet("QWidget { background: #1a1a2e; color: #e0e0e0; font-size: 12px; }")
+        
+        logo_path = os.path.join(IMAGES_DIR, "logo.png")
+        if os.path.exists(logo_path):
+            app.setWindowIcon(QIcon(logo_path))
+        
+        app.setStyleSheet("""
+            QWidget {
+                background-color: #1a1a2e;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', 'Arial', sans-serif;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #4a4ad2;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #5a5ae2; }
+            QTabWidget::pane { border: 1px solid #3a3a6a; border-radius: 5px; background: #1e1e32; }
+            QTabBar::tab { background: #2a2a4a; color: #8a8aaa; padding: 8px 18px; font-weight: bold; }
+            QTabBar::tab:selected { background: #1e1e32; color: #a0b0ff; border-bottom: 2px solid #4a4ad2; }
+        """)
         
         window = QMainWindow()
-        window.setWindowTitle("Bench Manager")
-        window.setGeometry(100, 50, 900, 600)
+        window.setWindowTitle("Bench Manager Pro")
+        window.setGeometry(100, 50, 1000, 700)
         
         central = QWidget()
         window.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(12, 12, 12, 12)
         
-        # Заголовок
-        title = QLabel("BENCH MANAGER")
-        title.setStyleSheet("color: #a0b0ff; font-size: 20px; font-weight: bold; padding: 10px;")
-        layout.addWidget(title)
+        # Header
+        header = QFrame()
+        header.setStyleSheet("QFrame { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1a1a4a, stop:0.5 #2a2a5a, stop:1 #1a1a4a); border-radius: 10px; }")
+        header.setFixedHeight(65)
+        header_layout = QHBoxLayout(header)
+        
+        logo_header = QLabel()
+        lp = os.path.join(IMAGES_DIR, "logo.png")
+        if os.path.exists(lp):
+            logo_header.setPixmap(QPixmap(lp).scaled(170, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            logo_header.setText("BENCH MANAGER")
+            logo_header.setStyleSheet("color: #4a4ad2; font-size: 20px; font-weight: bold; background: transparent;")
+        header_layout.addWidget(logo_header)
+        header_layout.addStretch()
+        
+        title_lbl = QLabel("BENCH MANAGER PRO")
+        title_lbl.setStyleSheet("color: #cdd6f4; font-size: 18px; font-weight: bold; background: transparent;")
+        header_layout.addWidget(title_lbl)
+        header_layout.addStretch()
+        
+        status_indicator = QLabel("СТЕНДЫ: ...")
+        status_indicator.setStyleSheet("color: #ff9800; font-size: 10px; font-weight: bold; background: transparent;")
+        header_layout.addWidget(status_indicator)
+        
+        main_layout.addWidget(header)
         
         # Вкладки
         tabs = QTabWidget()
-        layout.addWidget(tabs)
+        main_layout.addWidget(tabs)
         
-        # Вкладка стендов
-        stands_widget = QWidget()
-        stands_layout = QVBoxLayout(stands_widget)
+        # ---- СТЕНДЫ ----
+        stands_tab = QWidget()
+        stands_layout = QVBoxLayout(stands_tab)
         
-        info_label = QLabel("Загрузка стендов...")
-        stands_layout.addWidget(info_label)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        
+        cards_widget = QWidget()
+        cards_grid = QGridLayout(cards_widget)
+        cards_grid.setSpacing(15)
+        
+        stand_cards = {}
+        positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
+        
+        for (name, info), (row, col) in zip(bc.stands.items(), positions):
+            card = StandCard(name, info.ip, info.username, info.stand_type)
+            cards_grid.addWidget(card, row, col)
+            stand_cards[name] = card
+        
+        scroll.setWidget(cards_widget)
+        stands_layout.addWidget(scroll)
+        
+        btn_row = QHBoxLayout()
+        
+        def update_cards():
+            for name, card in stand_cards.items():
+                if name in bc.stands:
+                    info = bc.stands[name]
+                    card.update_status(info.status, info.connected)
+            online = sum(1 for s in bc.stands.values() if s.status == "online")
+            status_indicator.setText(f"СТЕНДЫ: {online}/4 ONLINE")
+            status_indicator.setStyleSheet(f"color: {'#4caf50' if online > 0 else '#f44336'}; font-size: 10px; font-weight: bold; background: transparent;")
         
         refresh_btn = QPushButton("ОБНОВИТЬ")
-        stands_layout.addWidget(refresh_btn)
+        refresh_btn.clicked.connect(update_cards)
+        btn_row.addWidget(refresh_btn)
         
-        def refresh_stands():
-            text = ""
-            for name, info in bc.get_all_info().items():
-                s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
-                c = "ПОДКЛЮЧЕН" if info['connected'] else "НЕТ"
-                text += f"{name:12} | {info['ip']:16} | {s:8} | {c}\n"
-            info_label.setText(text)
+        def connect_stand():
+            name, ok = QInputDialog.getItem(window, "Подключение", "Выберите стенд:", list(bc.STANDS.keys()), 0, False)
+            if ok and name:
+                pwd, ok2 = QInputDialog.getText(window, "Пароль", f"Пароль для {name}:", QLineEdit.Password)
+                if ok2 and pwd:
+                    if bc.connect(name, pwd):
+                        QMessageBox.information(window, "Успех", f"Подключен к {name}")
+                    else:
+                        QMessageBox.critical(window, "Ошибка", f"Не удалось подключиться к {name}")
+                    update_cards()
         
-        refresh_btn.clicked.connect(refresh_stands)
+        connect_btn = QPushButton("ПОДКЛЮЧИТЬСЯ")
+        connect_btn.clicked.connect(connect_stand)
+        btn_row.addWidget(connect_btn)
+        btn_row.addStretch()
+        stands_layout.addLayout(btn_row)
         
-        # Кнопка подключения
-        connect_btn = QPushButton("ПОДКЛЮЧИТЬСЯ К СТЕНДУ")
-        connect_btn.clicked.connect(lambda: bc.connect("ГОЗ"))
-        stands_layout.addWidget(connect_btn)
+        tabs.addTab(stands_tab, "СТЕНДЫ")
         
-        stands_layout.addStretch()
-        tabs.addTab(stands_widget, "СТЕНДЫ")
+        # ---- ПРОЦЕССЫ ----
+        proc_tab = QWidget()
+        proc_layout = QVBoxLayout(proc_tab)
+        proc_layout.addWidget(QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ"))
         
-        # Вкладка логов
-        log_widget = QTextEdit()
-        log_widget.setReadOnly(True)
-        tabs.addTab(log_widget, "ЛОГИ")
+        proc_stand = QComboBox()
+        proc_stand.addItems(list(bc.STANDS.keys()))
+        proc_layout.addWidget(proc_stand)
         
-        refresh_stands()
+        proc_btns = QHBoxLayout()
+        proc_btns.addWidget(QPushButton("ЗАПУСТИТЬ ./1po2_1n"))
+        proc_btns.addWidget(QPushButton("ОСТАНОВИТЬ (slay)"))
+        proc_btns.addWidget(QPushButton("ПЕРЕЗАПУСТИТЬ"))
+        proc_layout.addLayout(proc_btns)
+        
+        proc_log = QTextEdit()
+        proc_log.setReadOnly(True)
+        proc_log.setMaximumHeight(200)
+        proc_layout.addWidget(proc_log)
+        proc_layout.addStretch()
+        tabs.addTab(proc_tab, "ПРОЦЕССЫ")
+        
+        # ---- ПЛАТЫ ----
+        board_tab = QWidget()
+        board_layout = QVBoxLayout(board_tab)
+        board_layout.addWidget(QLabel("РАБОТА С ПЛАТАМИ"))
+        
+        board_stand = QComboBox()
+        board_stand.addItems(["ГОЗ", "Арктика", "C1M"])
+        board_layout.addWidget(board_stand)
+        
+        flash_btn = QPushButton("ПРОШИТЬ")
+        board_layout.addWidget(flash_btn)
+        
+        board_log = QTextEdit()
+        board_log.setReadOnly(True)
+        board_log.setMaximumHeight(200)
+        board_layout.addWidget(board_log)
+        board_layout.addStretch()
+        tabs.addTab(board_tab, "ПЛАТЫ")
+        
+        # ---- ЛОГИ ----
+        log_tab = QWidget()
+        log_layout = QVBoxLayout(log_tab)
+        log_text = QTextEdit()
+        log_text.setReadOnly(True)
+        log_layout.addWidget(log_text)
+        log_clear = QPushButton("ОЧИСТИТЬ")
+        log_clear.clicked.connect(lambda: log_text.clear())
+        log_layout.addWidget(log_clear)
+        tabs.addTab(log_tab, "ЛОГИ")
+        
+        # Таймер обновления
+        timer = QTimer()
+        timer.timeout.connect(update_cards)
+        timer.start(3000)
+        QTimer.singleShot(500, update_cards)
+        
         window.show()
         sys.exit(app.exec_())
         
-    except ImportError:
-        print("PyQt5 не установлен. Запустите: pip install PyQt5")
-        print("Или используйте консольный режим: python main.py --console")
+    except ImportError as e:
+        print(f"PyQt5 не установлен: {e}")
+        print("pip install PyQt5")
+        print("или: python main.py --console")
         bc.stop_monitoring()
         sys.exit(1)
 
