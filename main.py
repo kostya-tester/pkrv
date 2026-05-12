@@ -100,14 +100,19 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def _ssh_cmd(self, name, remote_cmd, tty=False, timeout=10):
-        """Выполняет SSH команду. Для старых стендов использует plink.exe."""
+        """Выполняет SSH команду. Принимает ключ хоста перед подключением."""
         info = self.stands[name]
         
         if name in self.STANDS and PLINK_PATH:
+            # Сначала принимаем ключ хоста (без -batch, с echo y)
+            accept_cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} {info.username}@{info.ip} "exit"'
+            subprocess.run(accept_cmd, shell=True, capture_output=True, text=True, timeout=10)
+            
+            # Теперь основная команда с -batch
             if tty:
-                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -batch -t {info.username}@{info.ip} "{remote_cmd}"'
+                cmd = f'"{PLINK_PATH}" -ssh -pw {info.password} -batch -t {info.username}@{info.ip} "{remote_cmd}"'
             else:
-                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -batch {info.username}@{info.ip} "{remote_cmd}"'
+                cmd = f'"{PLINK_PATH}" -ssh -pw {info.password} -batch {info.username}@{info.ip} "{remote_cmd}"'
         else:
             opts = self.NORMAL_SSH_OPTS
             if tty:
@@ -403,7 +408,7 @@ def main():
             bc.disconnect(name)
             update_cards()
         
-        # Вкладка СТЕНДЫ
+        # СТЕНДЫ
         stands_tab = QWidget()
         stands_layout = QVBoxLayout(stands_tab)
         stands_layout.setAlignment(Qt.AlignCenter)
@@ -426,7 +431,7 @@ def main():
         stands_layout.addWidget(refresh_btn, alignment=Qt.AlignCenter)
         tabs.addTab(stands_tab, "СТЕНДЫ")
         
-        # Вкладка ORANGEPI
+        # ORANGEPI
         orange_tab = QWidget()
         orange_layout = QVBoxLayout(orange_tab)
         orange_layout.setAlignment(Qt.AlignCenter)
@@ -445,7 +450,7 @@ def main():
         orange_layout.addWidget(refresh_op_btn, alignment=Qt.AlignCenter)
         tabs.addTab(orange_tab, "ORANGEPI")
         
-        # Вкладка ФАЙЛЫ СТЕНДОВ
+        # ФАЙЛЫ СТЕНДОВ
         files_tab = QWidget()
         files_layout = QVBoxLayout(files_tab)
         files_sel = QHBoxLayout()
@@ -518,7 +523,7 @@ def main():
         files_layout.addLayout(files_btn_row)
         tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
         
-        # Вкладка ФАЙЛЫ ORANGEPI
+        # ФАЙЛЫ ORANGEPI
         op_files_tab = QWidget()
         op_files_layout = QVBoxLayout(op_files_tab)
         op_files_sel = QHBoxLayout()
@@ -582,7 +587,7 @@ def main():
         op_files_layout.addLayout(op_btn_row)
         tabs.addTab(op_files_tab, "ФАЙЛЫ ORANGEPI")
         
-        # Вкладка ПРОЦЕССЫ
+        # ПРОЦЕССЫ
         proc_tab = QWidget()
         proc_layout = QVBoxLayout(proc_tab)
         proc_layout.addWidget(QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ", alignment=Qt.AlignCenter, styleSheet="color: #a0b0ff; font-size: 18px; font-weight: bold;"))
@@ -624,7 +629,7 @@ def main():
         proc_layout.addStretch()
         tabs.addTab(proc_tab, "ПРОЦЕССЫ")
         
-        # Вкладка ЛОГИ
+        # ЛОГИ
         log_tab = QWidget()
         log_layout = QVBoxLayout(log_tab)
         log_text = QTextEdit()
