@@ -49,18 +49,10 @@ class BenchConnector:
     
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
-    NORMAL_SSH_OPTS = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5"
-    
     def __init__(self):
         self.stands = {}
         self.monitoring = False
         self.ssh_clients = {}
-        self.has_paramiko = False
-        try:
-            import paramiko
-            self.has_paramiko = True
-        except ImportError:
-            pass
         self._init_stands()
     
     def _init_stands(self):
@@ -96,7 +88,6 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def connect(self, name, password=None):
-        """Подключение к стенду."""
         if name not in self.stands: 
             return False, f"Стенд {name} не найден"
         info = self.stands[name]
@@ -105,52 +96,84 @@ class BenchConnector:
         if not password:
             return False, f"Нет пароля для стенда {name}"
         
-        if self.has_paramiko:
-            if name in self.STANDS:
-                return self._connect_paramiko_su(name, info, password)
-            else:
-                return self._connect_paramiko(name, info, password)
+        try:
+            import paramiko
+        except ImportError:
+            return False, "Библиотека paramiko не установлена. Выполните: pip install paramiko"
+        
+        if name in self.STANDS:
+            return self._connect_with_su(name, info, password)
         else:
-            return self._connect_subprocess(name, info, password)
+            return self._connect_simple(name, info, password)
     
-    def _connect_paramiko(self, name, info, password):
-        """Подключение через paramiko (OrangePi)"""
+    def _connect_simple(self, name, info, password):
+        """Обычное подключение (OrangePi)"""
         import paramiko
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(info.ip, username=info.username, password=password, timeout=10, look_for_keys=False, allow_agent=False)
+            ssh.connect(
+                info.ip, username=info.username, password=password,
+                timeout=10, look_for_keys=False, allow_agent=False,
+                disabled_algorithms={'pubkeys': []}
+            )
             self.ssh_clients[name] = ssh
             info.connected = True
             return True, f"Подключен к {name}"
         except paramiko.AuthenticationException:
             return False, "Неверный логин или пароль"
         except Exception as e:
-            return False, f"Ошибка подключения: {e}"
+            return False, f"Ошибка: {str(e)[:300]}"
     
-    def _connect_paramiko_su(self, name, info, password):
-        """Подключение через paramiko + su + qconn"""
+    def _connect_with_su(self, name, info, password):
+        """Подключение + su + qconn"""
         import paramiko
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(info.ip, username=info.username, password=password, timeout=10, look_for_keys=False, allow_agent=False)
             
-            # Выполняем su и qconn
+            # Пробуем разные комбинации алгоритмов
+            connect_kwargs = {
+                'hostname': info.ip,
+                'username': info.username,
+                'password': password,
+                'timeout': 10,
+                'look_for_keys': False,
+                'allow_agent': False,
+            }
+            
+            # Пробуем без ограничений
+            try:
+                ssh.connect(**connect_kwargs)
+            except:
+                # Пробуем с отключением pubkeys
+                try:
+                    ssh.connect(**connect_kwargs, disabled_algorithms={'pubkeys': []})
+                except:
+                    # Пробуем вообще без проверки ключей
+                    ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
+                    ssh.connect(**connect_kwargs)
+            
+            # Выполняем su и qconn через shell
             channel = ssh.invoke_shell()
-            time.sleep(0.5)
+            time.sleep(0.3)
             channel.recv(4096)
             
             channel.send(f"su\n")
-            time.sleep(0.5)
+            time.sleep(0.3)
             channel.send(f"{password}\n")
-            time.sleep(0.5)
+            time.sleep(0.3)
             channel.send("qconn\n")
-            time.sleep(0.5)
+            time.sleep(0.3)
             channel.send("ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL\n")
-            time.sleep(1)
+            time.sleep(0.5)
             
-            output = channel.recv(4096).decode('utf-8', errors='ignore')
+            output = ""
+            for _ in range(10):
+                if channel.recv_ready():
+                    output += channel.recv(4096).decode('utf-8', errors='ignore')
+                time.sleep(0.1)
+            
             channel.close()
             
             if 'OK' in output:
@@ -159,24 +182,14 @@ class BenchConnector:
                 return True, f"Подключен к {name}\n(su + qconn выполнены)"
             else:
                 ssh.close()
-                return False, f"su или qconn не сработали.\nОтвет: {output[-300:]}"
+                if 'FAIL' in output:
+                    return False, "Пароль SSH принят, но su или qconn не сработали."
+                return False, f"Не удалось выполнить su/qconn.\nОтвет: {output[-300:]}"
                 
         except paramiko.AuthenticationException:
             return False, "Неверный логин или пароль SSH"
         except Exception as e:
-            return False, f"Ошибка подключения: {e}"
-    
-    def _connect_subprocess(self, name, info, password):
-        """Подключение через subprocess (без paramiko)"""
-        try:
-            cmd = f'ssh {self.NORMAL_SSH_OPTS} {info.username}@{info.ip} "echo OK"'
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-            if 'OK' in result.stdout:
-                info.connected = True
-                return True, f"Подключен к {name}"
-            return False, f"Не удалось подключиться.\n{result.stdout[-200:]}\n{result.stderr[-200:]}"
-        except Exception as e:
-            return False, f"Ошибка: {e}"
+            return False, f"Ошибка подключения: {str(e)[:300]}"
     
     def disconnect(self, name):
         if name in self.ssh_clients:
@@ -188,12 +201,11 @@ class BenchConnector:
             self.stands[name].connected = False
     
     def execute(self, name, command, timeout=30):
-        """Выполнение команды на стенде"""
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
         info = self.stands[name]
         
-        if name in self.ssh_clients and self.has_paramiko:
+        if name in self.ssh_clients:
             try:
                 if name in self.STANDS:
                     full_cmd = f"echo '{info.password}' | su -c 'qconn && {command}'"
@@ -204,17 +216,7 @@ class BenchConnector:
             except Exception as e:
                 return False, "", str(e)
         else:
-            pwd = info.password
-            if name in self.STANDS:
-                full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'"
-            else:
-                full_cmd = command
-            cmd = f'ssh -tt {self.NORMAL_SSH_OPTS} {info.username}@{info.ip} "{full_cmd}"'
-            try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-                return r.returncode == 0, r.stdout, r.stderr
-            except:
-                return False, "", "Ошибка выполнения"
+            return False, "", "Нет SSH-клиента"
     
     def get_all_info(self):
         return {name: {"name": s.name, "ip": s.ip, "username": s.username,
