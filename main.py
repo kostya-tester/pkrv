@@ -100,19 +100,14 @@ class BenchConnector:
     def stop_monitoring(self): self.monitoring = False
 
     def _ssh_cmd(self, name, remote_cmd, tty=False, timeout=10):
-        """Выполняет SSH команду. Принимает ключ хоста перед подключением."""
+        """Выполняет SSH команду через plink с передачей 'y' для ключа."""
         info = self.stands[name]
         
         if name in self.STANDS and PLINK_PATH:
-            # Сначала принимаем ключ хоста (без -batch, с echo y)
-            accept_cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} {info.username}@{info.ip} "exit"'
-            subprocess.run(accept_cmd, shell=True, capture_output=True, text=True, timeout=10)
-            
-            # Теперь основная команда с -batch
             if tty:
-                cmd = f'"{PLINK_PATH}" -ssh -pw {info.password} -batch -t {info.username}@{info.ip} "{remote_cmd}"'
+                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} -t {info.username}@{info.ip} "{remote_cmd}"'
             else:
-                cmd = f'"{PLINK_PATH}" -ssh -pw {info.password} -batch {info.username}@{info.ip} "{remote_cmd}"'
+                cmd = f'echo y | "{PLINK_PATH}" -ssh -pw {info.password} {info.username}@{info.ip} "{remote_cmd}"'
         else:
             opts = self.NORMAL_SSH_OPTS
             if tty:
@@ -120,9 +115,20 @@ class BenchConnector:
             cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
         
         try:
-            return subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            return subprocess.CompletedProcess(cmd, -1, "", "Таймаут подключения")
+            proc = subprocess.Popen(
+                cmd,
+                shell=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            try:
+                stdout, stderr = proc.communicate(input="y\ny\n", timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+            return subprocess.CompletedProcess(cmd, proc.returncode, stdout or "", stderr or "")
         except Exception as e:
             return subprocess.CompletedProcess(cmd, -1, "", str(e))
 
@@ -145,14 +151,14 @@ class BenchConnector:
             if 'OK' in result.stdout:
                 info.connected = True
                 return True, f"Подключен к {name}"
-            return False, f"Не удалось подключиться.\n\nОтвет:\n{result.stdout.strip()[-200:]}\n\nSTDERR:\n{result.stderr.strip()[-200:]}"
+            return False, f"Не удалось подключиться.\n\n{result.stdout[-200:]}\n\n{result.stderr[-200:]}"
         except Exception as e:
             return False, f"Ошибка: {e}"
     
     def _connect_with_su(self, name, info, password):
         try:
             remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-            result = self._ssh_cmd(name, remote_cmd, tty=True, timeout=20)
+            result = self._ssh_cmd(name, remote_cmd, tty=True, timeout=25)
             stdout = result.stdout.strip()
             stderr = result.stderr.strip()
             
@@ -160,17 +166,17 @@ class BenchConnector:
                 info.connected = True
                 return True, f"Подключен к {name}\n(su + qconn выполнены)"
             
-            error_msg = f"Не удалось подключиться к {name}.\n\nХост: {info.username}@{info.ip}\n\n"
+            msg = f"Не удалось подключиться к {name}.\n\nХост: {info.username}@{info.ip}\n\n"
             if 'FAIL' in stdout:
-                error_msg += "Пароль SSH принят, но su или qconn не сработали."
+                msg += "su или qconn не сработали."
             elif 'Permission denied' in stdout or 'Permission denied' in stderr:
-                error_msg += "Неверный логин или пароль SSH."
+                msg += "Неверный логин или пароль."
             else:
-                if stdout: error_msg += f"Ответ сервера:\n{stdout[-400:]}"
-                if stderr: error_msg += f"\n\nSTDERR:\n{stderr[-400:]}"
-            return False, error_msg
+                if stdout: msg += f"Ответ: {stdout[-400:]}"
+                if stderr: msg += f"\nSTDERR: {stderr[-400:]}"
+            return False, msg
         except Exception as e:
-            return False, f"Ошибка: {type(e).__name__}: {e}"
+            return False, f"Ошибка: {e}"
     
     def disconnect(self, name):
         if name in self.stands:
