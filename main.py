@@ -167,23 +167,48 @@ class BenchConnector:
                        "type": s.stand_type} for name, s in self.stands.items()}
     
     def diagnose_connection(self, name):
-        """Диагностика проблем подключения"""
+        """Диагностика проблем подключения (с таймаутами)"""
         results = []
         
         # 1. Проверка сети
         info = self.stands[name]
         results.append(f"=== Диагностика {name} ({info.ip}) ===")
+        results.append(f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        results.append("")
         
-        # Ping
-        ping_result = subprocess.run(f"ping -n 1 {info.ip}", shell=True, capture_output=True, text=True)
-        results.append(f"Ping: {'OK' if ping_result.returncode == 0 else 'FAIL'}")
+        # Ping с таймаутом
+        try:
+            ping_result = subprocess.run(
+                f"ping -n 1 -w 2 {info.ip}",
+                shell=True, 
+                capture_output=True, 
+                text=True, 
+                timeout=5
+            )
+            if ping_result.returncode == 0:
+                results.append("[1] Ping: OK")
+            else:
+                results.append("[1] Ping: FAIL")
+        except subprocess.TimeoutExpired:
+            results.append("[1] Ping: TIMEOUT")
+        except Exception as e:
+            results.append(f"[1] Ping: ERROR - {str(e)}")
         
         # Проверка SSH порта
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        port_result = sock.connect_ex((info.ip, 22))
-        sock.close()
-        results.append(f"Port 22: {'OPEN' if port_result == 0 else 'CLOSED'}")
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            port_result = sock.connect_ex((info.ip, 22))
+            sock.close()
+            if port_result == 0:
+                results.append("[2] Port 22: OPEN")
+            else:
+                results.append("[2] Port 22: CLOSED")
+        except Exception as e:
+            results.append(f"[2] Port 22: ERROR - {str(e)}")
+        
+        results.append("")
+        results.append("--- SSH подключение ---")
         
         # 2. Проверка SSH с разными опциями
         for opts_name, opts in [("NORMAL", self.NORMAL_SSH_OPTS), ("OLD", self.OLD_SSH_OPTS)]:
@@ -191,23 +216,36 @@ class BenchConnector:
             try:
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
                 if "SSH_OK" in r.stdout:
-                    results.append(f"SSH ({opts_name}): OK")
+                    results.append(f"[3] SSH ({opts_name}): OK")
                 else:
-                    results.append(f"SSH ({opts_name}): FAIL - {r.stderr[:100]}")
+                    error_msg = r.stderr[:80] if r.stderr else r.stdout[:80]
+                    results.append(f"[3] SSH ({opts_name}): FAIL - {error_msg}")
+            except subprocess.TimeoutExpired:
+                results.append(f"[3] SSH ({opts_name}): TIMEOUT (10 sec)")
             except Exception as e:
-                results.append(f"SSH ({opts_name}): ERROR - {str(e)}")
+                results.append(f"[3] SSH ({opts_name}): ERROR - {str(e)}")
         
-        # 3. Проверка su с паролем
+        results.append("")
+        results.append("--- Авторизация ---")
+        
+        # 3. Проверка su с паролем (только для основных стендов)
         if name in self.STANDS:
             cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'whoami\' 2>&1"'
             try:
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
                 if "root" in r.stdout:
-                    results.append("su: OK (получен root)")
+                    results.append("[4] su: OK (получен root)")
                 else:
-                    results.append(f"su: FAIL - {r.stdout[:100]} {r.stderr[:100]}")
+                    out_part = r.stdout[:80] if r.stdout else ""
+                    err_part = r.stderr[:80] if r.stderr else ""
+                    results.append(f"[4] su: FAIL - {out_part} {err_part}")
+            except subprocess.TimeoutExpired:
+                results.append("[4] su: TIMEOUT (15 sec)")
             except Exception as e:
-                results.append(f"su: ERROR - {str(e)}")
+                results.append(f"[4] su: ERROR - {str(e)}")
+        
+        results.append("")
+        results.append("--- Проверка qconn ---")
         
         # 4. Проверка qconn
         if name in self.STANDS:
@@ -215,11 +253,37 @@ class BenchConnector:
             try:
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
                 if r.stdout.strip():
-                    results.append(f"qconn: найдено по пути {r.stdout.strip()}")
+                    results.append(f"[5] qconn: FOUND ({r.stdout.strip()[:50]})")
                 else:
-                    results.append("qconn: НЕ НАЙДЕН!")
+                    results.append("[5] qconn: NOT FOUND")
+            except subprocess.TimeoutExpired:
+                results.append("[5] qconn: TIMEOUT (15 sec)")
             except Exception as e:
-                results.append(f"qconn: ERROR - {str(e)}")
+                results.append(f"[5] qconn: ERROR - {str(e)}")
+        
+        results.append("")
+        results.append("--- Проверка целевой папки ---")
+        
+        # 5. Проверка доступа к папке CVS
+        if name in self.STANDS:
+            cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'ls -la /home/pkrv/CVS/ | head -5\' 2>&1"'
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+                if "total" in r.stdout or "drwx" in r.stdout:
+                    results.append("[6] CVS папка: ACCESS OK")
+                    # Показываем первые 2 строки
+                    lines = [l for l in r.stdout.split('\n') if l.strip()][:2]
+                    for line in lines:
+                        results.append(f"    {line[:60]}")
+                else:
+                    results.append(f"[6] CVS папка: NO ACCESS - {r.stderr[:80]}")
+            except subprocess.TimeoutExpired:
+                results.append("[6] CVS папка: TIMEOUT (15 sec)")
+            except Exception as e:
+                results.append(f"[6] CVS папка: ERROR - {str(e)}")
+        
+        results.append("")
+        results.append("=== ДИАГНОСТИКА ЗАВЕРШЕНА ===")
         
         return "\n".join(results)
 
@@ -443,7 +507,7 @@ def main():
                 self.create_op_files_tab()
                 self.create_processes_tab()
                 self.create_logs_tab()
-                self.create_diagnostics_tab()  # Добавлена вкладка диагностики
+                self.create_diagnostics_tab()
             
             def create_stands_tab(self):
                 stands_tab = QWidget()
@@ -518,7 +582,7 @@ def main():
                 # Quick buttons
                 quick_row = QHBoxLayout()
                 quick_row.addStretch()
-                for path, label in [("/home/pkrv/CVS", "📁 CVS"), ("/tmp", "📁 /tmp"), ("/fead_hd", "📁 fead_hd")]:
+                for path, label in [("/home/pkrv/CVS", "CVS"), ("/tmp", "/tmp"), ("/fead_hd", "fead_hd")]:
                     btn = QPushButton(label)
                     btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; background-color: #3a3a6a; }")
                     btn.clicked.connect(lambda checked, p=path: self.browse_stand_files(p))
@@ -544,7 +608,7 @@ def main():
                 btn_row.addStretch()
                 btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=self.browse_stand_files))
                 btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=self.cd_stand_folder))
-                btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=self.up_stand))
+                btn_row.addWidget(QPushButton("ВВЕРХ", clicked=self.up_stand))
                 btn_row.addStretch()
                 files_layout.addLayout(btn_row)
                 
@@ -582,7 +646,7 @@ def main():
                 op_btn.addStretch()
                 op_btn.addWidget(QPushButton("ОТКРЫТЬ", clicked=self.browse_op))
                 op_btn.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=self.cd_op))
-                op_btn.addWidget(QPushButton("↑ НАВЕРХ", clicked=self.up_op))
+                op_btn.addWidget(QPushButton("ВВЕРХ", clicked=self.up_op))
                 op_btn.addStretch()
                 op_layout.addLayout(op_btn)
                 
@@ -641,28 +705,45 @@ def main():
                 diag_tab = QWidget()
                 diag_layout = QVBoxLayout(diag_tab)
                 
-                diag_stand = QComboBox()
-                diag_stand.addItems(["ГОЗ", "Арктика", "C1M", "OrangePi"])
-                diag_layout.addWidget(diag_stand)
+                self.diag_stand = QComboBox()
+                self.diag_stand.addItems(["ГОЗ", "Арктика", "C1M", "OrangePi"])
+                diag_layout.addWidget(self.diag_stand)
                 
-                diag_text = QTextEdit()
-                diag_text.setReadOnly(True)
-                diag_text.setFont(QFont("Consolas", 10))
-                diag_layout.addWidget(diag_text)
+                self.diag_text = QTextEdit()
+                self.diag_text.setReadOnly(True)
+                self.diag_text.setFont(QFont("Consolas", 10))
+                diag_layout.addWidget(self.diag_text)
+                
+                self.diag_status = QLabel("Готов к диагностике")
+                self.diag_status.setStyleSheet("color: #888; font-size: 11px;")
+                diag_layout.addWidget(self.diag_status)
                 
                 def run_diagnostic():
-                    diag_text.clear()
-                    name = diag_stand.currentText()
-                    diag_text.setText("Выполняется диагностика...\n")
-                    QApplication.processEvents()
+                    # Блокируем кнопки во время диагностики
+                    self.diag_stand.setEnabled(False)
+                    diag_btn.setEnabled(False)
+                    self.diag_text.clear()
+                    self.diag_status.setText("Выполняется диагностика... подождите")
+                    self.diag_status.setStyleSheet("color: #ff9800; font-size: 11px;")
                     
-                    # Запускаем диагностику в отдельном потоке
+                    name = self.diag_stand.currentText()
+                    
                     def do_diagnose():
-                        result = bc.diagnose_connection(name)
-                        # Возвращаем результат в главный поток
-                        from PyQt5.QtCore import QMetaObject, Qt
-                        QMetaObject.invokeMethod(diag_text, "setText", Qt.QueuedConnection, result)
+                        try:
+                            result = bc.diagnose_connection(name)
+                            self.diag_text.setText(result)
+                            self.diag_status.setText("Диагностика завершена")
+                            self.diag_status.setStyleSheet("color: #4caf50; font-size: 11px;")
+                        except Exception as e:
+                            self.diag_text.setText(f"Ошибка при диагностике:\n{str(e)}")
+                            self.diag_status.setText(f"Ошибка: {str(e)[:50]}")
+                            self.diag_status.setStyleSheet("color: #f44336; font-size: 11px;")
+                        finally:
+                            # Разблокируем кнопки
+                            self.diag_stand.setEnabled(True)
+                            diag_btn.setEnabled(True)
                     
+                    # Запускаем в отдельном потоке
                     threading.Thread(target=do_diagnose, daemon=True).start()
                 
                 diag_btn = QPushButton("ЗАПУСТИТЬ ДИАГНОСТИКУ")
@@ -697,15 +778,15 @@ def main():
                     return
                 
                 if self.connecting_states.get(name, False):
-                    return  # уже подключаемся
+                    return
                 
                 self.connecting_states[name] = True
                 self.update_all_cards()
                 
                 # Запускаем поток подключения
-                self.thread = ConnectThread(name)
-                self.thread.finished.connect(self.on_connect_finished)
-                self.thread.start()
+                self.connect_thread = ConnectThread(name)
+                self.connect_thread.finished.connect(self.on_connect_finished)
+                self.connect_thread.start()
             
             def on_connect_finished(self, name, ok, msg):
                 """Обработка завершения подключения"""
