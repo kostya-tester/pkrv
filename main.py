@@ -79,10 +79,12 @@ class BenchConnector:
             r = s.connect_ex((ip, 22))
             s.close()
             return r == 0
-        except: return False
+        except: 
+            return False
     
     def start_monitoring(self):
-        if self.monitoring: return
+        if self.monitoring: 
+            return
         self.monitoring = True
         def loop():
             while self.monitoring:
@@ -95,7 +97,8 @@ class BenchConnector:
                 time.sleep(5)
         threading.Thread(target=loop, daemon=True).start()
     
-    def stop_monitoring(self): self.monitoring = False
+    def stop_monitoring(self): 
+        self.monitoring = False
 
     def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=15):
         info = self.stands[name]
@@ -163,10 +166,20 @@ class BenchConnector:
                        "type": s.stand_type} for name, s in self.stands.items()}
 
 # ============================================================
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ GUI
+# ============================================================
+
+bc = None
+stand_cards = {}
+window_ref = None
+
+# ============================================================
 # MAIN
 # ============================================================
 
 def main():
+    global bc, stand_cards, window_ref
+    
     parser = argparse.ArgumentParser(description="Bench Manager")
     parser.add_argument('--console', '-c', action='store_true')
     parser.add_argument('--check', action='store_true')
@@ -198,7 +211,7 @@ def main():
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
             QLineEdit, QMessageBox, QFrame, QTreeWidget, QTreeWidgetItem
         )
-        from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+        from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
         from PyQt5.QtGui import QPixmap, QIcon, QColor
         
         STAND_IMAGES = {
@@ -235,80 +248,514 @@ def main():
                 layout = QVBoxLayout(self)
                 layout.setSpacing(8)
                 layout.setContentsMargins(15, 15, 15, 15)
+                
                 img_name = STAND_IMAGES.get(name, "logo.png")
                 img_label = QLabel()
                 img_label.setPixmap(load_pixmap(img_name, 280, 180))
                 img_label.setAlignment(Qt.AlignCenter)
                 img_label.setStyleSheet("background: transparent; border: none;")
                 layout.addWidget(img_label)
+                
                 name_lbl = QLabel(name)
                 name_lbl.setStyleSheet("color: #cdd6f4; font-size: 20px; font-weight: bold; background: transparent;")
                 name_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(name_lbl)
+                
                 ip_lbl = QLabel(f"{username}@{ip}")
                 ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 12px; background: transparent;")
                 ip_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(ip_lbl)
+                
                 if stand_type:
                     type_lbl = QLabel(stand_type)
                     type_lbl.setStyleSheet("color: #6a6aaa; font-size: 10px; background: transparent;")
                     type_lbl.setAlignment(Qt.AlignCenter)
                     layout.addWidget(type_lbl)
+                
                 self.status_lbl = QLabel("OFFLINE")
                 self.status_lbl.setStyleSheet("color: #f44336; font-size: 14px; font-weight: bold; background: transparent;")
                 self.status_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.status_lbl)
+                
                 self.indicator = QLabel("●")
                 self.indicator.setStyleSheet("color: #f44336; font-size: 16px; background: transparent;")
                 self.indicator.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.indicator)
+                
                 layout.addSpacing(10)
+                
                 self.connect_btn = QPushButton("ПОДКЛЮЧИТЬ")
                 self.connect_btn.setMinimumHeight(35)
-                self.connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #66bb6a; }")
+                self.connect_btn.setStyleSheet("QPushButton { background-color: #4caf50; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #66bb6a; } QPushButton:disabled { background-color: #666; }")
                 layout.addWidget(self.connect_btn)
+                
                 self.disconnect_btn = QPushButton("ОТКЛЮЧИТЬ")
                 self.disconnect_btn.setMinimumHeight(35)
-                self.disconnect_btn.setStyleSheet("QPushButton { background-color: #d24a4a; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #e25a5a; }")
+                self.disconnect_btn.setStyleSheet("QPushButton { background-color: #d24a4a; font-size: 12px; padding: 8px; border-radius: 6px; } QPushButton:hover { background-color: #e25a5a; } QPushButton:disabled { background-color: #666; }")
                 self.disconnect_btn.setEnabled(False)
                 layout.addWidget(self.disconnect_btn)
+                
                 layout.addStretch()
             
-            def update_status(self, status, connected):
-                if status == "online":
+            def update_status(self, status, connected, is_connecting=False):
+                if is_connecting:
+                    self.status_lbl.setText("CONNECTING...")
+                    self.status_lbl.setStyleSheet("color: #ff9800; font-size: 14px; font-weight: bold; background: transparent;")
+                    self.indicator.setStyleSheet("color: #ff9800; font-size: 16px; background: transparent;")
+                    self.connect_btn.setEnabled(False)
+                    self.disconnect_btn.setEnabled(False)
+                elif status == "online":
                     self.status_lbl.setText("ONLINE")
                     self.status_lbl.setStyleSheet("color: #4caf50; font-size: 14px; font-weight: bold; background: transparent;")
                     self.indicator.setStyleSheet("color: #4caf50; font-size: 16px; background: transparent;")
                     self.connect_btn.setEnabled(not connected)
                     self.disconnect_btn.setEnabled(connected)
-                elif status == "connecting":
-                    self.status_lbl.setText("CONNECTING...")
-                    self.status_lbl.setStyleSheet("color: #ff9800; font-size: 14px; font-weight: bold; background: transparent;")
-                    self.indicator.setStyleSheet("color: #ff9800; font-size: 16px; background: transparent;")
                 else:
                     self.status_lbl.setText("OFFLINE")
                     self.status_lbl.setStyleSheet("color: #f44336; font-size: 14px; font-weight: bold; background: transparent;")
                     self.indicator.setStyleSheet("color: #f44336; font-size: 16px; background: transparent;")
-                    self.connect_btn.setEnabled(status == "online")
+                    self.connect_btn.setEnabled(False)
                     self.disconnect_btn.setEnabled(False)
         
-        class MainWindow(QMainWindow):
-            connect_result = pyqtSignal(str, bool, str)
+        class ConnectThread(QThread):
+            finished = pyqtSignal(str, bool, str)
             
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+            
+            def run(self):
+                ok, msg = bc.connect(self.name)
+                self.finished.emit(self.name, ok, msg)
+        
+        class MainWindow(QMainWindow):
             def __init__(self):
                 super().__init__()
-                self.connect_result.connect(self.on_connect_result)
+                self.connecting_states = {}
+                self.init_ui()
+                self.setup_timer()
             
-            def on_connect_result(self, name, ok, msg):
+            def init_ui(self):
+                self.setWindowTitle("Bench Manager Pro")
+                self.setGeometry(50, 30, 1300, 850)
+                
+                central = QWidget()
+                self.setCentralWidget(central)
+                main_layout = QVBoxLayout(central)
+                main_layout.setSpacing(10)
+                main_layout.setContentsMargins(15, 15, 15, 15)
+                
+                # Header
+                header = QFrame()
+                header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
+                header.setFixedHeight(80)
+                header_layout = QHBoxLayout(header)
+                header_layout.setContentsMargins(25, 10, 25, 10)
+                
+                logo_header = QLabel()
+                lp = load_logo(260, 65)
+                if lp:
+                    logo_header.setPixmap(lp)
+                    logo_header.setFixedSize(260, 65)
+                else:
+                    logo_header.setText("BENCH MANAGER")
+                    logo_header.setStyleSheet("color: #1a1a4a; font-size: 22px; font-weight: bold; background: transparent;")
+                logo_header.setStyleSheet("background: transparent;")
+                header_layout.addWidget(logo_header)
+                header_layout.addStretch()
+                
+                title_lbl = QLabel("BENCH MANAGER PRO")
+                title_lbl.setStyleSheet("color: #1a1a4a; font-size: 24px; font-weight: bold; background: transparent; letter-spacing: 4px;")
+                header_layout.addWidget(title_lbl)
+                header_layout.addStretch()
+                
+                self.status_label = QLabel("ЗАГРУЗКА...")
+                self.status_label.setStyleSheet("color: #666; font-size: 13px; font-weight: bold; background: transparent;")
+                header_layout.addWidget(self.status_label)
+                
+                main_layout.addWidget(header)
+                
+                # Tabs
+                self.tabs = QTabWidget()
+                main_layout.addWidget(self.tabs)
+                
+                self.create_stands_tab()
+                self.create_orange_tab()
+                self.create_files_tab()
+                self.create_op_files_tab()
+                self.create_processes_tab()
+                self.create_logs_tab()
+            
+            def create_stands_tab(self):
+                stands_tab = QWidget()
+                stands_layout = QVBoxLayout(stands_tab)
+                stands_layout.setAlignment(Qt.AlignCenter)
+                
+                cards_widget = QWidget()
+                cards_layout = QHBoxLayout(cards_widget)
+                cards_layout.setSpacing(25)
+                cards_layout.setAlignment(Qt.AlignCenter)
+                
+                for name in ["ГОЗ", "Арктика", "C1M"]:
+                    info = bc.stands[name]
+                    card = StandCard(name, info.ip, info.username, info.stand_type)
+                    card.connect_btn.clicked.connect(lambda checked, n=name: self.connect_stand(n))
+                    card.disconnect_btn.clicked.connect(lambda checked, n=name: self.disconnect_stand(n))
+                    cards_layout.addWidget(card)
+                    stand_cards[name] = card
+                
+                stands_layout.addWidget(cards_widget, alignment=Qt.AlignCenter)
+                
+                refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
+                refresh_btn.setMaximumWidth(220)
+                refresh_btn.clicked.connect(self.update_all_cards)
+                stands_layout.addWidget(refresh_btn, alignment=Qt.AlignCenter)
+                
+                self.tabs.addTab(stands_tab, "СТЕНДЫ")
+            
+            def create_orange_tab(self):
+                orange_tab = QWidget()
+                orange_layout = QVBoxLayout(orange_tab)
+                orange_layout.setAlignment(Qt.AlignCenter)
+                
+                title = QLabel("OrangePi")
+                title.setAlignment(Qt.AlignCenter)
+                title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
+                orange_layout.addWidget(title)
+                
+                info = bc.stands["OrangePi"]
+                card = StandCard("OrangePi", info.ip, info.username, info.stand_type)
+                card.connect_btn.clicked.connect(lambda: self.connect_stand("OrangePi"))
+                card.disconnect_btn.clicked.connect(lambda: self.disconnect_stand("OrangePi"))
+                stand_cards["OrangePi"] = card
+                orange_layout.addWidget(card, alignment=Qt.AlignCenter)
+                orange_layout.addStretch()
+                
+                refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
+                refresh_btn.setMaximumWidth(220)
+                refresh_btn.clicked.connect(self.update_all_cards)
+                orange_layout.addWidget(refresh_btn, alignment=Qt.AlignCenter)
+                
+                self.tabs.addTab(orange_tab, "ORANGEPI")
+            
+            def create_files_tab(self):
+                files_tab = QWidget()
+                files_layout = QVBoxLayout(files_tab)
+                
+                # Selection row
+                files_sel = QHBoxLayout()
+                files_sel.addStretch()
+                files_sel.addWidget(QLabel("Стенд:"))
+                self.files_stand = QComboBox()
+                self.files_stand.addItems(["ГОЗ", "Арктика", "C1M"])
+                files_sel.addWidget(self.files_stand)
+                files_sel.addWidget(QLabel("Путь:"))
+                self.files_path = QLineEdit("/home/pkrv/CVS")
+                self.files_path.setMinimumWidth(350)
+                files_sel.addWidget(self.files_path)
+                files_sel.addStretch()
+                files_layout.addLayout(files_sel)
+                
+                # Quick buttons
+                quick_row = QHBoxLayout()
+                quick_row.addStretch()
+                for path, label in [("/home/pkrv/CVS", "📁 CVS"), ("/tmp", "📁 /tmp"), ("/fead_hd", "📁 fead_hd")]:
+                    btn = QPushButton(label)
+                    btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; background-color: #3a3a6a; }")
+                    btn.clicked.connect(lambda checked, p=path: self.browse_stand_files(p))
+                    quick_row.addWidget(btn)
+                quick_row.addStretch()
+                files_layout.addLayout(quick_row)
+                
+                # Tree
+                self.files_tree = QTreeWidget()
+                self.files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
+                self.files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
+                self.files_tree.itemDoubleClicked.connect(self.cd_stand_folder)
+                files_layout.addWidget(self.files_tree)
+                
+                # Log
+                self.files_log = QTextEdit()
+                self.files_log.setReadOnly(True)
+                self.files_log.setMaximumHeight(50)
+                files_layout.addWidget(self.files_log)
+                
+                # Buttons
+                btn_row = QHBoxLayout()
+                btn_row.addStretch()
+                btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=self.browse_stand_files))
+                btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=self.cd_stand_folder))
+                btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=self.up_stand))
+                btn_row.addStretch()
+                files_layout.addLayout(btn_row)
+                
+                self.tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
+            
+            def create_op_files_tab(self):
+                op_tab = QWidget()
+                op_layout = QVBoxLayout(op_tab)
+                
+                op_sel = QHBoxLayout()
+                op_sel.addStretch()
+                op_sel.addWidget(QLabel("Стенд:"))
+                self.op_stand = QComboBox()
+                self.op_stand.addItems(["OrangePi"])
+                op_sel.addWidget(self.op_stand)
+                op_sel.addWidget(QLabel("Путь:"))
+                self.op_path = QLineEdit("/")
+                self.op_path.setMinimumWidth(350)
+                op_sel.addWidget(self.op_path)
+                op_sel.addStretch()
+                op_layout.addLayout(op_sel)
+                
+                self.op_tree = QTreeWidget()
+                self.op_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
+                self.op_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; }")
+                self.op_tree.itemDoubleClicked.connect(self.cd_op)
+                op_layout.addWidget(self.op_tree)
+                
+                self.op_log = QTextEdit()
+                self.op_log.setReadOnly(True)
+                self.op_log.setMaximumHeight(50)
+                op_layout.addWidget(self.op_log)
+                
+                op_btn = QHBoxLayout()
+                op_btn.addStretch()
+                op_btn.addWidget(QPushButton("ОТКРЫТЬ", clicked=self.browse_op))
+                op_btn.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=self.cd_op))
+                op_btn.addWidget(QPushButton("↑ НАВЕРХ", clicked=self.up_op))
+                op_btn.addStretch()
+                op_layout.addLayout(op_btn)
+                
+                self.tabs.addTab(op_tab, "ФАЙЛЫ ORANGEPI")
+            
+            def create_processes_tab(self):
+                proc_tab = QWidget()
+                proc_layout = QVBoxLayout(proc_tab)
+                
+                title = QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ")
+                title.setAlignment(Qt.AlignCenter)
+                title.setStyleSheet("color: #a0b0ff; font-size: 18px; font-weight: bold;")
+                proc_layout.addWidget(title)
+                
+                sel_row = QHBoxLayout()
+                sel_row.addStretch()
+                sel_row.addWidget(QLabel("Стенд:"))
+                self.proc_stand = QComboBox()
+                self.proc_stand.addItems(["ГОЗ", "Арктика", "C1M"])
+                sel_row.addWidget(self.proc_stand)
+                sel_row.addStretch()
+                proc_layout.addLayout(sel_row)
+                
+                self.proc_log = QTextEdit()
+                self.proc_log.setReadOnly(True)
+                self.proc_log.setMaximumHeight(250)
+                self.proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas;")
+                proc_layout.addWidget(self.proc_log)
+                
+                act_row = QHBoxLayout()
+                act_row.addStretch()
+                act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=self.start_process, styleSheet="background:#4caf50;"))
+                act_row.addWidget(QPushButton("ОСТАНОВИТЬ", clicked=self.stop_process, styleSheet="background:#d24a4a;"))
+                act_row.addWidget(QPushButton("ПЕРЕЗАПУСТИТЬ", clicked=self.restart_process, styleSheet="background:#ff9800;"))
+                act_row.addStretch()
+                proc_layout.addLayout(act_row)
+                proc_layout.addStretch()
+                
+                self.tabs.addTab(proc_tab, "ПРОЦЕССЫ")
+            
+            def create_logs_tab(self):
+                log_tab = QWidget()
+                log_layout = QVBoxLayout(log_tab)
+                
+                self.log_text = QTextEdit()
+                self.log_text.setReadOnly(True)
+                self.log_text.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas;")
+                log_layout.addWidget(self.log_text)
+                
+                log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: self.log_text.clear()))
+                
+                self.tabs.addTab(log_tab, "ЛОГИ")
+            
+            def setup_timer(self):
+                self.timer = QTimer()
+                self.timer.timeout.connect(self.update_all_cards)
+                self.timer.start(3000)
+                QTimer.singleShot(500, self.update_all_cards)
+            
+            def update_all_cards(self):
+                """Обновляет все карточки стендов"""
+                for name, card in stand_cards.items():
+                    if name in bc.stands:
+                        stand = bc.stands[name]
+                        is_connecting = self.connecting_states.get(name, False)
+                        card.update_status(stand.status, stand.connected, is_connecting)
+                
+                # Обновляем статус в хедере
+                online = sum(1 for s in bc.stands.values() if s.status == "online")
+                connected = sum(1 for s in bc.stands.values() if s.connected)
+                self.status_label.setText(f"ONLINE: {online}/4 | CONNECTED: {connected}")
+            
+            def connect_stand(self, name):
+                info = bc.stands[name]
+                if info.status != "online":
+                    QMessageBox.warning(self, "Ошибка", f"Стенд {name} не в сети!")
+                    return
+                
+                if self.connecting_states.get(name, False):
+                    return  # уже подключаемся
+                
+                self.connecting_states[name] = True
+                self.update_all_cards()
+                
+                # Запускаем поток подключения
+                self.thread = ConnectThread(name)
+                self.thread.finished.connect(self.on_connect_finished)
+                self.thread.start()
+            
+            def on_connect_finished(self, name, ok, msg):
+                """Обработка завершения подключения"""
+                self.connecting_states[name] = False
+                
                 if ok:
                     QMessageBox.information(self, "Успех", msg)
+                    self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Подключен к {name}")
                 else:
                     QMessageBox.critical(self, "Ошибка подключения", msg)
-                update_cards()
+                    self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка подключения к {name}: {msg}")
+                
+                self.update_all_cards()
+            
+            def disconnect_stand(self, name):
+                bc.disconnect(name)
+                self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Отключен от {name}")
+                self.update_all_cards()
+            
+            # Методы для файлов стендов
+            def browse_stand_files(self, path=None):
+                if path:
+                    self.files_path.setText(path)
+                name = self.files_stand.currentText()
+                path = self.files_path.text().strip() or "/"
+                
+                if name in bc.stands and bc.stands[name].connected:
+                    self.files_tree.clear()
+                    ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                    if ok:
+                        for line in out.split('\n'):
+                            if line.startswith('total') or not line.strip():
+                                continue
+                            parts = line.split()
+                            if len(parts) >= 8:
+                                fname = ' '.join(parts[7:])
+                                if fname in ['.', '..']:
+                                    continue
+                                is_dir = line.startswith('d')
+                                item = QTreeWidgetItem([
+                                    fname, 
+                                    parts[4] if not is_dir else "", 
+                                    "Папка" if is_dir else "Файл", 
+                                    f"{parts[5]} {parts[6]}" if len(parts) > 6 else ""
+                                ])
+                                if is_dir:
+                                    item.setForeground(0, QColor("#61dafb"))
+                                self.files_tree.addTopLevelItem(item)
+                        self.files_log.append(f"[OK] {path}")
+                    else:
+                        self.files_log.append(f"[ОШИБКА] {err}")
+                else:
+                    self.files_log.append(f"Стенд {name} не подключен")
+            
+            def cd_stand_folder(self):
+                item = self.files_tree.currentItem()
+                if item and item.text(2) == "Папка":
+                    self.files_path.setText(f"{self.files_path.text().rstrip('/')}/{item.text(0)}")
+                    self.browse_stand_files()
+            
+            def up_stand(self):
+                cur = self.files_path.text().rstrip('/')
+                if cur != '/':
+                    self.files_path.setText(os.path.dirname(cur) or '/')
+                    self.browse_stand_files()
+            
+            # Методы для файлов OrangePi
+            def browse_op(self):
+                name = self.op_stand.currentText()
+                path = self.op_path.text().strip() or "/"
+                
+                if name in bc.stands and bc.stands[name].connected:
+                    self.op_tree.clear()
+                    ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                    if ok:
+                        for line in out.split('\n'):
+                            if line.startswith('total') or not line.strip():
+                                continue
+                            parts = line.split()
+                            if len(parts) >= 8:
+                                fname = ' '.join(parts[7:])
+                                if fname in ['.', '..']:
+                                    continue
+                                is_dir = line.startswith('d')
+                                item = QTreeWidgetItem([
+                                    fname, 
+                                    parts[4] if not is_dir else "", 
+                                    "Папка" if is_dir else "Файл", 
+                                    f"{parts[5]} {parts[6]}" if len(parts) > 6 else ""
+                                ])
+                                if is_dir:
+                                    item.setForeground(0, QColor("#61dafb"))
+                                self.op_tree.addTopLevelItem(item)
+                        self.op_log.append(f"[OK] {path}")
+                    else:
+                        self.op_log.append(f"[ОШИБКА] {err}")
+                else:
+                    self.op_log.append(f"Стенд {name} не подключен")
+            
+            def cd_op(self):
+                item = self.op_tree.currentItem()
+                if item and item.text(2) == "Папка":
+                    self.op_path.setText(f"{self.op_path.text().rstrip('/')}/{item.text(0)}")
+                    self.browse_op()
+            
+            def up_op(self):
+                cur = self.op_path.text().rstrip('/')
+                if cur != '/':
+                    self.op_path.setText(os.path.dirname(cur) or '/')
+                    self.browse_op()
+            
+            # Методы для процессов
+            def log_proc(self, msg):
+                self.proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+            
+            def start_process(self):
+                n = self.proc_stand.currentText()
+                if bc.stands[n].connected:
+                    ok, out, err = bc.execute(n, "cd /home/pkrv/fpo_cfg && nohup ./1po2_1n > /dev/null 2>&1 & echo $!")
+                    if ok:
+                        self.log_proc(f"{n}: запущен PID: {out.strip()}")
+                    else:
+                        self.log_proc(f"{n}: Ошибка - {err}")
+                else:
+                    self.log_proc(f"{n}: Нет подключения")
+            
+            def stop_process(self):
+                n = self.proc_stand.currentText()
+                if bc.stands[n].connected:
+                    bc.execute(n, "pkill -f 1po2_1n; slay 1po2_1n 2>/dev/null")
+                    self.log_proc(f"{n}: остановлен")
+                else:
+                    self.log_proc(f"{n}: Нет подключения")
+            
+            def restart_process(self):
+                self.stop_process()
+                time.sleep(1)
+                self.start_process()
         
         app = QApplication(sys.argv)
+        
         logo_p = load_logo()
-        if logo_p: app.setWindowIcon(QIcon(logo_p))
+        if logo_p:
+            app.setWindowIcon(QIcon(logo_p))
         
         app.setStyleSheet("""
             QWidget { background-color: #1a1a2e; color: #e0e0e0; font-size: 13px; }
@@ -320,263 +767,15 @@ def main():
         """)
         
         window = MainWindow()
-        window.setWindowTitle("Bench Manager Pro")
-        window.setGeometry(50, 30, 1300, 850)
-        central = QWidget()
-        window.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(15, 15, 15, 15)
-        
-        header = QFrame()
-        header.setStyleSheet("QFrame { background-color: #ffffff; border-radius: 12px; }")
-        header.setFixedHeight(80)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(25, 10, 25, 10)
-        logo_header = QLabel()
-        lp = load_logo(260, 65)
-        if lp:
-            logo_header.setPixmap(lp)
-            logo_header.setFixedSize(260, 65)
-        else:
-            logo_header.setText("BENCH MANAGER")
-            logo_header.setStyleSheet("color: #1a1a4a; font-size: 22px; font-weight: bold; background: transparent;")
-        logo_header.setStyleSheet("background: transparent;")
-        header_layout.addWidget(logo_header)
-        header_layout.addStretch()
-        title_lbl = QLabel("BENCH MANAGER PRO")
-        title_lbl.setStyleSheet("color: #1a1a4a; font-size: 24px; font-weight: bold; background: transparent; letter-spacing: 4px;")
-        header_layout.addWidget(title_lbl)
-        header_layout.addStretch()
-        self_status = QLabel("ЗАГРУЗКА...")
-        self_status.setStyleSheet("color: #666; font-size: 13px; font-weight: bold; background: transparent;")
-        header_layout.addWidget(self_status)
-        main_layout.addWidget(header)
-        
-        tabs = QTabWidget()
-        main_layout.addWidget(tabs)
-        stand_cards = {}
-        main_stands = ["ГОЗ", "Арктика", "C1M"]
-        
-        def update_cards():
-            for name, card in stand_cards.items():
-                if name in bc.stands:
-                    card.update_status(bc.stands[name].status, bc.stands[name].connected)
-            online = sum(1 for s in bc.stands.values() if s.status == "online")
-            connected = sum(1 for s in bc.stands.values() if s.connected)
-            self_status.setText(f"ONLINE: {online}/4 | CONNECTED: {connected}")
-        
-        def connect_stand(name):
-            info = bc.stands[name]
-            if info.status != "online":
-                QMessageBox.warning(window, "Ошибка", f"Стенд {name} не в сети!")
-                return
-            stand_cards[name].update_status("connecting", False)
-            QApplication.processEvents()
-            
-            def do_connect():
-                try:
-                    ok, msg = bc.connect(name)
-                except Exception as e:
-                    ok, msg = False, f"Критическая ошибка: {str(e)}"
-                window.connect_result.emit(name, ok, msg)
-            
-            threading.Thread(target=do_connect, daemon=True).start()
-        
-        def disconnect_stand(name):
-            bc.disconnect(name)
-            update_cards()
-        
-        # СТЕНДЫ
-        stands_tab = QWidget()
-        stands_layout = QVBoxLayout(stands_tab)
-        stands_layout.setAlignment(Qt.AlignCenter)
-        cards_widget = QWidget()
-        cards_layout = QHBoxLayout(cards_widget)
-        cards_layout.setSpacing(25)
-        cards_layout.setAlignment(Qt.AlignCenter)
-        for name in main_stands:
-            info = bc.stands[name]
-            card = StandCard(name, info.ip, info.username, info.stand_type)
-            cards_layout.addWidget(card)
-            stand_cards[name] = card
-            card.connect_btn.clicked.connect(lambda checked, n=name: connect_stand(n))
-            card.disconnect_btn.clicked.connect(lambda checked, n=name: disconnect_stand(n))
-        stands_layout.addWidget(cards_widget, alignment=Qt.AlignCenter)
-        refresh_btn = QPushButton("ОБНОВИТЬ СТАТУС")
-        refresh_btn.setMaximumWidth(220)
-        refresh_btn.clicked.connect(update_cards)
-        stands_layout.addWidget(refresh_btn, alignment=Qt.AlignCenter)
-        tabs.addTab(stands_tab, "СТЕНДЫ")
-        
-        # ORANGEPI
-        orange_tab = QWidget()
-        orange_layout = QVBoxLayout(orange_tab)
-        orange_layout.setAlignment(Qt.AlignCenter)
-        orange_layout.addWidget(QLabel("OrangePi", alignment=Qt.AlignCenter, styleSheet="color: #a0b0ff; font-size: 18px; font-weight: bold;"))
-        op_info = bc.stands["OrangePi"]
-        op_card = StandCard("OrangePi", op_info.ip, op_info.username, op_info.stand_type)
-        op_card.connect_btn.clicked.connect(lambda: connect_stand("OrangePi"))
-        op_card.disconnect_btn.clicked.connect(lambda: disconnect_stand("OrangePi"))
-        stand_cards["OrangePi"] = op_card
-        orange_layout.addWidget(op_card, alignment=Qt.AlignCenter)
-        orange_layout.addStretch()
-        refresh_op_btn = QPushButton("ОБНОВИТЬ СТАТУС")
-        refresh_op_btn.setMaximumWidth(220)
-        refresh_op_btn.clicked.connect(update_cards)
-        orange_layout.addWidget(refresh_op_btn, alignment=Qt.AlignCenter)
-        tabs.addTab(orange_tab, "ORANGEPI")
-        
-        # ФАЙЛЫ СТЕНДОВ
-        files_tab = QWidget()
-        files_layout = QVBoxLayout(files_tab)
-        files_sel = QHBoxLayout()
-        files_sel.addStretch()
-        files_sel.addWidget(QLabel("Стенд:"))
-        files_stand = QComboBox()
-        files_stand.addItems(main_stands)
-        files_sel.addWidget(files_stand)
-        files_sel.addWidget(QLabel("Путь:"))
-        files_path = QLineEdit("/home/pkrv/CVS")
-        files_path.setMinimumWidth(350)
-        files_sel.addWidget(files_path)
-        files_sel.addStretch()
-        files_layout.addLayout(files_sel)
-        quick_row = QHBoxLayout()
-        quick_row.addStretch()
-        for path, label in [("/home/pkrv/CVS", "📁 CVS"), ("/tmp", "📁 /tmp"), ("/fead_hd", "📁 fead_hd")]:
-            btn = QPushButton(label)
-            btn.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; background-color: #3a3a6a; }")
-            btn.clicked.connect(lambda checked, p=path: (files_path.setText(p), browse_stand_files()))
-            quick_row.addWidget(btn)
-        quick_row.addStretch()
-        files_layout.addLayout(quick_row)
-        files_tree = QTreeWidget()
-        files_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-        files_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; } QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; }")
-        files_layout.addWidget(files_tree)
-        files_log = QTextEdit(); files_log.setReadOnly(True); files_log.setMaximumHeight(50)
-        files_layout.addWidget(files_log)
-        def browse_stand_files():
-            name = files_stand.currentText()
-            path = files_path.text().strip() or "/"
-            if name in bc.stands and bc.stands[name].connected:
-                files_tree.clear()
-                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
-                if ok:
-                    for line in out.split('\n'):
-                        if line.startswith('total') or not line.strip(): continue
-                        parts = line.split()
-                        if len(parts) >= 8:
-                            fname = ' '.join(parts[7:])
-                            if fname in ['.', '..']: continue
-                            is_dir = line.startswith('d')
-                            item = QTreeWidgetItem([fname, parts[4] if not is_dir else "", "Папка" if is_dir else "Файл", f"{parts[5]} {parts[6]}" if len(parts)>6 else ""])
-                            if is_dir: item.setForeground(0, QColor("#61dafb"))
-                            files_tree.addTopLevelItem(item)
-                    files_log.append(f"[OK] {path}")
-                else: files_log.append(f"[ОШИБКА] {err}")
-            else: files_log.append(f"Стенд {name} не подключен")
-        def cd_stand_folder():
-            item = files_tree.currentItem()
-            if item and item.text(2) == "Папка":
-                files_path.setText(f"{files_path.text().rstrip('/')}/{item.text(0)}")
-                browse_stand_files()
-        def up_stand():
-            cur = files_path.text().rstrip('/')
-            if cur != '/': files_path.setText(os.path.dirname(cur) or '/'); browse_stand_files()
-        btn_row = QHBoxLayout(); btn_row.addStretch()
-        btn_row.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_stand_files))
-        btn_row.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_stand_folder))
-        btn_row.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_stand))
-        btn_row.addStretch(); files_layout.addLayout(btn_row)
-        tabs.addTab(files_tab, "ФАЙЛЫ СТЕНДОВ")
-        
-        # ФАЙЛЫ ORANGEPI
-        op_tab = QWidget(); op_layout = QVBoxLayout(op_tab)
-        op_sel = QHBoxLayout(); op_sel.addStretch()
-        op_sel.addWidget(QLabel("Стенд:")); op_stand = QComboBox(); op_stand.addItems(["OrangePi"]); op_sel.addWidget(op_stand)
-        op_sel.addWidget(QLabel("Путь:")); op_path = QLineEdit("/"); op_path.setMinimumWidth(350); op_sel.addWidget(op_path)
-        op_sel.addStretch(); op_layout.addLayout(op_sel)
-        op_tree = QTreeWidget(); op_tree.setHeaderLabels(["Имя", "Размер", "Тип", "Дата"])
-        op_tree.setStyleSheet("QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; }")
-        op_layout.addWidget(op_tree)
-        op_log = QTextEdit(); op_log.setReadOnly(True); op_log.setMaximumHeight(50); op_layout.addWidget(op_log)
-        def browse_op():
-            name = op_stand.currentText(); path = op_path.text().strip() or "/"
-            if name in bc.stands and bc.stands[name].connected:
-                op_tree.clear()
-                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
-                if ok:
-                    for line in out.split('\n'):
-                        if line.startswith('total') or not line.strip(): continue
-                        parts = line.split()
-                        if len(parts) >= 8:
-                            fname = ' '.join(parts[7:])
-                            if fname in ['.', '..']: continue
-                            is_dir = line.startswith('d')
-                            item = QTreeWidgetItem([fname, parts[4] if not is_dir else "", "Папка" if is_dir else "Файл", f"{parts[5]} {parts[6]}" if len(parts)>6 else ""])
-                            if is_dir: item.setForeground(0, QColor("#61dafb")); op_tree.addTopLevelItem(item)
-                    op_log.append(f"[OK] {path}")
-                else: op_log.append(f"[ОШИБКА] {err}")
-            else: op_log.append(f"Стенд {name} не подключен")
-        def cd_op(): 
-            item = op_tree.currentItem()
-            if item and item.text(2) == "Папка": op_path.setText(f"{op_path.text().rstrip('/')}/{item.text(0)}"); browse_op()
-        def up_op(): 
-            cur = op_path.text().rstrip('/')
-            if cur != '/': op_path.setText(os.path.dirname(cur) or '/'); browse_op()
-        op_btn = QHBoxLayout(); op_btn.addStretch()
-        op_btn.addWidget(QPushButton("ОТКРЫТЬ", clicked=browse_op))
-        op_btn.addWidget(QPushButton("ЗАЙТИ В ПАПКУ", clicked=cd_op))
-        op_btn.addWidget(QPushButton("↑ НАВЕРХ", clicked=up_op))
-        op_btn.addStretch(); op_layout.addLayout(op_btn)
-        tabs.addTab(op_tab, "ФАЙЛЫ ORANGEPI")
-        
-        # ПРОЦЕССЫ
-        proc_tab = QWidget(); proc_layout = QVBoxLayout(proc_tab)
-        proc_layout.addWidget(QLabel("УПРАВЛЕНИЕ ПРОЦЕССАМИ", alignment=Qt.AlignCenter, styleSheet="color: #a0b0ff; font-size: 18px; font-weight: bold;"))
-        sel_row = QHBoxLayout(); sel_row.addStretch(); sel_row.addWidget(QLabel("Стенд:"))
-        proc_stand = QComboBox(); proc_stand.addItems(main_stands); sel_row.addWidget(proc_stand); sel_row.addStretch()
-        proc_layout.addLayout(sel_row)
-        proc_log = QTextEdit(); proc_log.setReadOnly(True); proc_log.setMaximumHeight(250)
-        proc_log.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas;")
-        proc_layout.addWidget(proc_log)
-        def log_proc(msg): proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-        def start_1(): 
-            n = proc_stand.currentText()
-            if bc.stands[n].connected:
-                ok, out, err = bc.execute(n, "cd /home/pkrv/fpo_cfg && nohup ./1po2_1n > /dev/null 2>&1 & echo $!")
-                log_proc(f"{n}: {'запущен PID:'+out.strip() if ok else 'Ошибка - '+err}")
-            else: log_proc(f"{n}: Нет подключения")
-        def stop_1(): 
-            n = proc_stand.currentText()
-            if bc.stands[n].connected: bc.execute(n, "pkill -f 1po2_1n; slay 1po2_1n 2>/dev/null"); log_proc(f"{n}: остановлен")
-            else: log_proc(f"{n}: Нет подключения")
-        act_row = QHBoxLayout(); act_row.addStretch()
-        act_row.addWidget(QPushButton("ЗАПУСТИТЬ", clicked=start_1, styleSheet="background:#4caf50;"))
-        act_row.addWidget(QPushButton("ОСТАНОВИТЬ", clicked=stop_1, styleSheet="background:#d24a4a;"))
-        act_row.addWidget(QPushButton("ПЕРЕЗАПУСТИТЬ", clicked=lambda: (stop_1(), time.sleep(1), start_1()), styleSheet="background:#ff9800;"))
-        act_row.addStretch(); proc_layout.addLayout(act_row); proc_layout.addStretch()
-        tabs.addTab(proc_tab, "ПРОЦЕССЫ")
-        
-        # ЛОГИ
-        log_tab = QWidget(); log_layout = QVBoxLayout(log_tab)
-        log_text = QTextEdit(); log_text.setReadOnly(True)
-        log_text.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas;")
-        log_layout.addWidget(log_text)
-        log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: log_text.clear()))
-        tabs.addTab(log_tab, "ЛОГИ")
-        
-        timer = QTimer(); timer.timeout.connect(update_cards); timer.start(3000)
-        QTimer.singleShot(500, update_cards)
-        
+        window_ref = window
         window.show()
+        
         sys.exit(app.exec_())
         
     except ImportError as e:
         print(f"PyQt5 не установлен: {e}")
-        bc.stop_monitoring()
+        if bc:
+            bc.stop_monitoring()
         sys.exit(1)
 
 if __name__ == "__main__":
