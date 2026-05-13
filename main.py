@@ -94,7 +94,7 @@ class SSHAutomator:
 # ============================================================
 
 class StandInfo:
-    def __init__(self, name, ip, username="pkrv", password="zxcv", stand_type=""):
+    def __init__(self, name, ip, username="pkrv", password="zxcv", stand_type="", port=22):
         self.name = name
         self.ip = ip
         self.username = username
@@ -103,15 +103,16 @@ class StandInfo:
         self.connected = False
         self.last_check = None
         self.stand_type = stand_type
+        self.port = port
 
 class BenchConnector:
     STANDS = {
-        "ГОЗ": {"ip": "192.168.243.248", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
-        "Арктика": {"ip": "192.168.243.249", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
-        "C1M": {"ip": "192.168.243.254", "username": "pkrv", "password": "zxcv", "type": "Основной стенд"},
+        "ГОЗ": {"ip": "192.168.243.248", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "port": 22},
+        "Арктика": {"ip": "192.168.243.249", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "port": 22},
+        "C1M": {"ip": "192.168.243.254", "username": "pkrv", "password": "zxcv", "type": "Основной стенд", "port": 22},
     }
     
-    ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
+    ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi", "port": 22}
     
     def __init__(self):
         self.stands = {}
@@ -121,15 +122,22 @@ class BenchConnector:
     
     def _init_stands(self):
         for name, cfg in self.STANDS.items():
-            self.stands[name] = StandInfo(name, cfg['ip'], cfg['username'], cfg.get('password', ''), cfg.get('type', ''))
-        self.stands["OrangePi"] = StandInfo("OrangePi", self.ORANGEPI['ip'], self.ORANGEPI['username'],
-                                             self.ORANGEPI.get('password', ''), self.ORANGEPI.get('type', ''))
+            self.stands[name] = StandInfo(
+                name, cfg['ip'], cfg['username'], 
+                cfg.get('password', ''), cfg.get('type', ''),
+                cfg.get('port', 22)
+            )
+        self.stands["OrangePi"] = StandInfo(
+            "OrangePi", self.ORANGEPI['ip'], self.ORANGEPI['username'],
+            self.ORANGEPI.get('password', ''), self.ORANGEPI.get('type', ''),
+            self.ORANGEPI.get('port', 22)
+        )
     
-    def check_availability(self, ip):
+    def check_availability(self, ip, port=22):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(1)
-            r = s.connect_ex((ip, 22))
+            r = s.connect_ex((ip, port))
             s.close()
             return r == 0
         except: 
@@ -143,7 +151,7 @@ class BenchConnector:
         def loop():
             while self.monitoring:
                 for name, info in self.stands.items():
-                    if self.check_availability(info.ip):
+                    if self.check_availability(info.ip, info.port):
                         info.status = "online"
                     else:
                         info.status = "offline"
@@ -166,10 +174,11 @@ class BenchConnector:
         pwd = password or info.password
         opts = self._get_ssh_opts(name)
         tty_opt = "-tt" if use_tty else ""
+        port_opt = f"-p {info.port}" if info.port != 22 else ""
         
         # Пробуем sshpass
         if SSH_TOOLS.get("sshpass") and pwd:
-            cmd = f'sshpass -p "{pwd}" ssh {opts} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
+            cmd = f'sshpass -p "{pwd}" ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
             try:
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
                 return r.returncode, r.stdout, r.stderr
@@ -179,7 +188,7 @@ class BenchConnector:
         # Пробуем expect
         if SSH_TOOLS.get("expect") and pwd:
             expect_script = f'''
-            spawn ssh {opts} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"
+            spawn ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"
             expect {{
                 "password:" {{ send "{pwd}\\r"; exp_continue }}
                 "yes/no" {{ send "yes\\r"; exp_continue }}
@@ -196,7 +205,7 @@ class BenchConnector:
                 pass
         
         # Если ничего нет - используем обычный ssh (пароль будет запрошен в терминале)
-        cmd = f'ssh {opts} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
+        cmd = f'ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
             return r.returncode, r.stdout, r.stderr
@@ -210,9 +219,10 @@ class BenchConnector:
         info = self.stands[name]
         opts = self._get_ssh_opts(name)
         pwd = info.password
+        port_opt = f"-P {info.port}" if info.port != 22 else ""
         
         if SSH_TOOLS.get("sshpass") and pwd:
-            cmd = f'sshpass -p "{pwd}" scp {opts} "{local_path}" {info.username}@{info.ip}:"{remote_path}" 2>&1'
+            cmd = f'sshpass -p "{pwd}" scp {opts} {port_opt} "{local_path}" {info.username}@{info.ip}:"{remote_path}" 2>&1'
             try:
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
                 return r.returncode == 0, r.stderr if r.stderr else r.stdout
@@ -221,7 +231,7 @@ class BenchConnector:
         
         if SSH_TOOLS.get("expect") and pwd:
             expect_script = f'''
-            spawn scp {opts} "{local_path}" {info.username}@{info.ip}:"{remote_path}"
+            spawn scp {opts} {port_opt} "{local_path}" {info.username}@{info.ip}:"{remote_path}"
             expect {{
                 "password:" {{ send "{pwd}\\r"; exp_continue }}
                 "yes/no" {{ send "yes\\r"; exp_continue }}
@@ -238,7 +248,7 @@ class BenchConnector:
                 pass
         
         # Обычный scp
-        cmd = f'scp {opts} "{local_path}" {info.username}@{info.ip}:"{remote_path}"'
+        cmd = f'scp {opts} {port_opt} "{local_path}" {info.username}@{info.ip}:"{remote_path}"'
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
             return r.returncode == 0, r.stderr if r.stderr else r.stdout
@@ -247,7 +257,8 @@ class BenchConnector:
 
     def connect(self, name, password=None):
         """
-        Подключение к стенду.
+        Подключение к стенду с полной авторизацией.
+        Для старых стендов: ssh -> sudo su
         """
         try:
             if name not in self.stands:
@@ -257,15 +268,83 @@ class BenchConnector:
             if password is None:
                 password = info.password
             
-            # Проверяем SSH доступ
-            test_cmd = "echo SSH_OK"
-            code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10, password=password)
+            if not password and info.username != "root":
+                return False, f"Нет пароля для стенда {name}"
             
-            if code == 0 and "SSH_OK" in stdout:
-                info.connected = True
-                return True, f"Подключен к {name}"
+            # Для старых стендов (ГОЗ, Арктика, C1M)
+            if name in self.STANDS:
+                # 1. Проверяем SSH доступ
+                test_cmd = "echo SSH_OK"
+                code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10, password=password)
+                
+                if code != 0:
+                    if "Permission denied" in stdout or "Permission denied" in stderr:
+                        return False, f"Неверный логин/пароль для {name}@{info.ip}"
+                    return False, f"Не удалось подключиться к {name} ({info.ip})\n{stderr[:200]}"
+                
+                # 2. Выполняем su и показываем содержимое папок
+                connect_cmd = (
+                    f'echo "{password}" | sudo -S -u root bash -c "'
+                    f'  echo SU_OK;'
+                    f'  echo --- /home/pkrv/CVS ---;'
+                    f'  ls -la /home/pkrv/CVS 2>&1;'
+                    f'  echo --- /tmp ---;'
+                    f'  ls -la /tmp 2>&1;'
+                    f'  echo --- /fead_hd ---;'
+                    f'  ls -la /fead_hd 2>&1;'
+                    f'  echo --- /fs/ssd0 ---;'
+                    f'  ls -la /fs/ssd0 2>&1;'
+                    f'" 2>/dev/null'
+                )
+                code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=False, timeout=20, password=password)
+                
+                # 3. Если sudo не сработал - пробуем expect
+                if "SU_OK" not in stdout and SSH_TOOLS.get("expect"):
+                    connect_cmd = (
+                        f'which expect >/dev/null 2>&1 && '
+                        f'expect -c \'set timeout 10; '
+                        f'spawn su -c "'
+                        f'echo SU_OK;'
+                        f'echo --- /home/pkrv/CVS ---;'
+                        f'ls -la /home/pkrv/CVS 2>&1;'
+                        f'echo --- /tmp ---;'
+                        f'ls -la /tmp 2>&1;'
+                        f'echo --- /fead_hd ---;'
+                        f'ls -la /fead_hd 2>&1;'
+                        f'echo --- /fs/ssd0 ---;'
+                        f'ls -la /fs/ssd0 2>&1;'
+                        f'"; '
+                        f'expect "Password:"; send "{password}\\r"; expect eof\' '
+                        f'|| echo "EXPECT_NOT_FOUND"'
+                    )
+                    code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=True, timeout=20, password=password)
+                
+                # 4. Формируем ответ
+                if "SU_OK" in stdout:
+                    info.connected = True
+                    result = f"Подключен к {name}\n\n"
+                    
+                    # Извлекаем содержимое папок
+                    parts = stdout.split("---")
+                    for part in parts:
+                        part = part.strip()
+                        if part and part not in ["SU_OK", "SUCCESS"]:
+                            result += part + "\n\n"
+                    
+                    return True, result.strip()
+                else:
+                    return False, (
+                        f"Не удалось выполнить su на {name}\n"
+                        f"stdout: {stdout[-300:]}\n"
+                        f"stderr: {stderr[-300:]}"
+                    )
             else:
-                return False, f"Не удалось подключиться к {name}\n{stderr[:200]}"
+                # Для OrangePi и других современных систем
+                code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10, password=password)
+                if code == 0:
+                    info.connected = True
+                    return True, f"Подключен к {name}"
+                return False, f"Ошибка подключения к {name}\n{stdout[-200:]}{stderr[-200:]}"
                 
         except Exception as e:
             return False, f"Критическая ошибка: {str(e)}"
@@ -277,6 +356,7 @@ class BenchConnector:
     def execute(self, name, command, timeout=30):
         """
         Выполнение команды на стенде.
+        Для старых стендов выполняет команду через sudo.
         """
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
@@ -284,14 +364,46 @@ class BenchConnector:
         info = self.stands[name]
         pwd = info.password
         
-        code, stdout, stderr = self._ssh_command(name, command, use_tty=False, timeout=timeout, password=pwd)
+        if name in self.STANDS:
+            # Для старых стендов выполняем через sudo
+            full_cmd = f'echo "{pwd}" | sudo -S bash -c "{command}"'
+            code, stdout, stderr = self._ssh_command(name, full_cmd, use_tty=False, timeout=timeout, password=pwd)
+        else:
+            # Для современных систем напрямую
+            code, stdout, stderr = self._ssh_command(name, command, timeout=timeout, password=pwd)
         
         return code == 0, stdout, stderr
     
     def get_all_info(self):
         return {name: {"name": s.name, "ip": s.ip, "username": s.username,
                        "status": s.status, "connected": s.connected,
-                       "type": s.stand_type} for name, s in self.stands.items()}
+                       "type": s.stand_type, "port": s.port} for name, s in self.stands.items()}
+    
+    def list_files(self, name, remote_path="/", password=None):
+        """Показать содержимое папки на стенде"""
+        if name not in self.stands:
+            return False, f"Стенд {name} не найден"
+        
+        cmd = f"ls -la {remote_path} 2>&1"
+        code, stdout, stderr = self.execute(name, cmd, timeout=10)
+        
+        if code == 0:
+            return True, f"Содержимое {remote_path}:\n\n{stdout.strip()}"
+        else:
+            return False, f"Не удалось прочитать {remote_path}:\n{stderr}"
+    
+    def delete_file(self, name, remote_path, password=None):
+        """Удалить файл на стенде"""
+        if name not in self.stands:
+            return False, f"Стенд {name} не найден"
+        
+        cmd = f"rm -f {remote_path} && echo OK"
+        code, stdout, stderr = self.execute(name, cmd, timeout=10)
+        
+        if code == 0 and "OK" in stdout:
+            return True, f"Файл {remote_path} удалён"
+        else:
+            return False, f"Не удалось удалить {remote_path}:\n{stderr}"
     
     def deploy_files(self, name, mode="move", local_dir=None):
         """Деплой файлов на стенд"""
@@ -355,7 +467,7 @@ class BenchConnector:
         results = []
         info = self.stands[name]
         
-        results.append(f"=== Диагностика {name} ({info.ip}) ===")
+        results.append(f"=== Диагностика {name} ({info.ip}:{info.port}) ===")
         results.append(f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         results.append(f"sshpass: {'есть' if SSH_TOOLS.get('sshpass') else 'нет'}")
         results.append(f"expect: {'есть' if SSH_TOOLS.get('expect') else 'нет'}")
@@ -374,20 +486,32 @@ class BenchConnector:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2)
-            port = sock.connect_ex((info.ip, 22))
+            port = sock.connect_ex((info.ip, info.port))
             sock.close()
-            results.append(f"  Port 22: {'OPEN' if port == 0 else 'CLOSED'}")
+            results.append(f"  Port {info.port}: {'OPEN' if port == 0 else 'CLOSED'}")
         except:
-            results.append("  Port 22: ERROR")
+            results.append(f"  Port {info.port}: ERROR")
         
         # SSH тест
         results.append("")
-        results.append("--- SSH тест ---")
-        code, stdout, stderr = self._ssh_command(name, "echo SSH_OK", timeout=10)
+        results.append("--- SSH ---")
+        test_cmd = "echo SSH_OK"
+        code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10)
         if code == 0 and "SSH_OK" in stdout:
             results.append("  SSH: OK")
         else:
-            results.append(f"  SSH: FAIL\n  stderr: {stderr[:100]}")
+            results.append(f"  SSH: FAIL\n  stdout: {stdout[:100]}\n  stderr: {stderr[:100]}")
+        
+        # sudo тест (для старых стендов)
+        if name in self.STANDS and code == 0:
+            results.append("")
+            results.append("--- sudo ---")
+            sudo_cmd = f'echo "{info.password}" | sudo -S echo SU_OK'
+            code, stdout, stderr = self._ssh_command(name, sudo_cmd, use_tty=False, timeout=10, password=info.password)
+            if "SU_OK" in stdout:
+                results.append("  sudo: OK (есть права root)")
+            else:
+                results.append(f"  sudo: FAIL\n  stdout: {stdout[:100]}\n  stderr: {stderr[:100]}")
         
         results.append("")
         results.append("--- РЕКОМЕНДАЦИИ ---")
@@ -450,14 +574,14 @@ def main():
         print("=== Доступные стенды ===")
         for name, info in bc.get_all_info().items():
             s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
-            print(f"  {name:12} | {info['ip']:16} | {s}")
+            print(f"  {name:12} | {info['ip']:16}:{info['port']} | {s}")
         
         if args.console:
             print("\n=== Подключение к стендам ===")
             for n in ["ГОЗ", "Арктика", "C1M"]:
                 print(f"\n{n}:")
                 ok, msg = bc.connect(n)
-                print(f"  {'OK' if ok else 'FAIL'} - {msg}")
+                print(f"  {'OK' if ok else 'FAIL'} - {msg[:200]}")
         
         bc.stop_monitoring()
         return
@@ -498,7 +622,7 @@ def main():
             return None
         
         class StandCard(QFrame):
-            def __init__(self, name, ip, username, stand_type):
+            def __init__(self, name, ip, username, stand_type, port=22):
                 super().__init__()
                 self.stand_name = name
                 self.setFixedSize(340, 480)
@@ -519,7 +643,7 @@ def main():
                 name_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(name_lbl)
                 
-                ip_lbl = QLabel(f"{username}@{ip}")
+                ip_lbl = QLabel(f"{username}@{ip}:{port}")
                 ip_lbl.setStyleSheet("color: #8a8aaa; font-size: 12px;")
                 ip_lbl.setAlignment(Qt.AlignCenter)
                 layout.addWidget(ip_lbl)
@@ -652,7 +776,7 @@ def main():
                 
                 for name in ["ГОЗ", "Арктика", "C1M", "OrangePi"]:
                     info = bc.stands[name]
-                    card = StandCard(name, info.ip, info.username, info.stand_type)
+                    card = StandCard(name, info.ip, info.username, info.stand_type, info.port)
                     card.connect_btn.clicked.connect(lambda checked, n=name: self.connect_stand(n))
                     card.disconnect_btn.clicked.connect(lambda checked, n=name: self.disconnect_stand(n))
                     cards_layout.addWidget(card)
