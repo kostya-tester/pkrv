@@ -116,6 +116,17 @@ class BenchConnector:
             return -1, "", "Таймаут подключения"
         except Exception as e:
             return -1, "", str(e)
+    
+    def _scp_copy(self, name, local_path, remote_path):
+        """Копирование файла через SCP"""
+        info = self.stands[name]
+        opts = self.OLD_SSH_OPTS if name in self.STANDS else self.NORMAL_SSH_OPTS
+        cmd = f'scp {opts} "{local_path}" {info.username}@{info.ip}:"{remote_path}" 2>&1'
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+            return r.returncode == 0, r.stderr
+        except Exception as e:
+            return False, str(e)
 
     def connect(self, name, password=None):
         try:
@@ -165,6 +176,240 @@ class BenchConnector:
         return {name: {"name": s.name, "ip": s.ip, "username": s.username,
                        "status": s.status, "connected": s.connected,
                        "type": s.stand_type} for name, s in self.stands.items()}
+    
+    def deploy_files(self, name, mode="move", local_dir=None):
+        """
+        Деплой файлов на стенд
+        mode: "move" - переименование старых файлов, "remove" - удаление, "copy" - бэкап
+        local_dir - директория с локальными файлами (по умолчанию текущая)
+        """
+        if name not in self.STANDS:
+            return False, f"Стенд {name} не найден"
+        
+        if not self.stands[name].connected:
+            return False, "Нет подключения к стенду"
+        
+        info = self.stands[name]
+        if local_dir is None:
+            local_dir = os.getcwd()
+        
+        results = []
+        results.append(f"=== Деплой файлов на {name} ===")
+        results.append(f"Режим: {mode}")
+        results.append("")
+        
+        # 1. Проверка локальных файлов
+        results.append("[1/6] Проверяю локальные файлы...")
+        mpo_path = os.path.join(local_dir, "mpo")
+        kc_path = os.path.join(local_dir, "KC_mpo.txt")
+        cfg_path = os.path.join(local_dir, "1po2_1n.cfg")
+        
+        if not os.path.exists(mpo_path):
+            return False, "Файл mpo не найден в текущей папке"
+        results.append("  + Файл mpo найден")
+        
+        if os.path.exists(kc_path):
+            results.append("  + Файл KC_mpo.txt найден")
+        else:
+            results.append("  ! Файл KC_mpo.txt не найден (будет использован существующий на сервере)")
+        
+        if os.path.exists(cfg_path):
+            results.append("  + Файл 1po2_1n.cfg найден")
+        else:
+            results.append("  ! Файл 1po2_1n.cfg не найден (будет использован существующий на сервере)")
+        results.append("")
+        
+        # 2. Бэкап файлов с сервера (только в режиме copy)
+        backup_dir = None
+        if mode == "copy":
+            results.append("[2/6] Режим copy: копирую файлы с сервера в локальную папку...")
+            backup_dir = os.path.join(local_dir, "back", datetime.now().strftime("%Y%m%d_%H%M%S"))
+            os.makedirs(backup_dir, exist_ok=True)
+            results.append(f"  + Создана папка для бэкапа: {backup_dir}")
+            
+            # Копируем mpo
+            ok, err = self._scp_copy(name, f"{info.username}@{info.ip}:/home/pkrv/CVS/mpo", 
+                                      os.path.join(backup_dir, "mpo").replace("\\", "/"))
+            if ok:
+                results.append("  + mpo скопирован с сервера")
+            else:
+                results.append("  ! mpo не найден на сервере или не удалось скопировать")
+            
+            # Копируем KC_mpo.txt
+            ok, err = self._scp_copy(name, f"{info.username}@{info.ip}:/home/pkrv/CVS/KC_mpo.txt",
+                                      os.path.join(backup_dir, "KC_mpo.txt").replace("\\", "/"))
+            if ok:
+                results.append("  + KC_mpo.txt скопирован с сервера")
+            else:
+                results.append("  ! KC_mpo.txt не найден на сервере или не удалось скопировать")
+            
+            # Копируем 1po2_1n.cfg
+            ok, err = self._scp_copy(name, f"{info.username}@{info.ip}:/fpo_cfg/1po2_1n.cfg",
+                                      os.path.join(backup_dir, "1po2_1n.cfg").replace("\\", "/"))
+            if ok:
+                results.append("  + 1po2_1n.cfg скопирован с сервера")
+            else:
+                results.append("  ! 1po2_1n.cfg не найден на сервере или не удалось скопировать")
+            
+            results.append(f"  + Бэкап сохранён в {backup_dir}")
+            results.append("")
+        
+        # 3. Обработка старых файлов на сервере
+        step_num = "2" if mode == "copy" else "2"
+        results.append(f"[{step_num}/6] Подготовка сервера: обработка старых файлов...")
+        
+        if mode == "remove":
+            remote_cleanup_cmd = """
+if [ -f /home/pkrv/CVS/mpo ]; then
+    rm -f /home/pkrv/CVS/mpo
+    echo '  Старый файл mpo удалён'
+fi
+if [ -f /home/pkrv/CVS/KC_mpo.txt ]; then
+    rm -f /home/pkrv/CVS/KC_mpo.txt
+    echo '  Старый файл KC_mpo.txt удалён'
+fi
+if [ -f /fpo_cfg/1po2_1n.cfg ]; then
+    rm -f /fpo_cfg/1po2_1n.cfg
+    echo '  Старый файл 1po2_1n.cfg удалён'
+fi
+"""
+        else:  # move or copy
+            remote_cleanup_cmd = """
+if [ -f /home/pkrv/CVS/mpo ]; then
+    mv /home/pkrv/CVS/mpo /home/pkrv/CVS/mpo_old
+    echo '  Найден старый mpo, переименован в mpo_old'
+else
+    echo '  Старый файл mpo отсутствует'
+fi
+if [ -f /home/pkrv/CVS/KC_mpo.txt ]; then
+    mv /home/pkrv/CVS/KC_mpo.txt /home/pkrv/CVS/KC_mpo.txt_old
+    echo '  Найден старый KC_mpo.txt, переименован в KC_mpo.txt_old'
+fi
+if [ -f /fpo_cfg/1po2_1n.cfg ]; then
+    mv /fpo_cfg/1po2_1n.cfg /fpo_cfg/1po2_1n.cfg_old
+    echo '  Найден старый 1po2_1n.cfg, переименован в 1po2_1n.cfg_old'
+fi
+"""
+        
+        code, stdout, stderr = self._ssh_command(name, remote_cleanup_cmd, use_tty=False, timeout=15)
+        results.append(stdout)
+        if stderr:
+            results.append(f"  Ошибки: {stderr}")
+        results.append("")
+        
+        # 4. Копирование новых файлов
+        step_num = "3" if mode == "copy" else "3"
+        results.append(f"[{step_num}/6] Копирование новых файлов на сервер...")
+        
+        # Копируем mpo
+        ok, err = self._scp_copy(name, mpo_path, "/home/pkrv/CVS/mpo")
+        if ok:
+            results.append("  + Новый файл mpo скопирован")
+        else:
+            results.append(f"  ОШИБКА: Не удалось скопировать файл mpo - {err}")
+            return False, "\n".join(results)
+        
+        # Копируем KC_mpo.txt
+        if os.path.exists(kc_path):
+            ok, err = self._scp_copy(name, kc_path, "/home/pkrv/CVS/KC_mpo.txt")
+            if ok:
+                results.append("  + KC_mpo.txt скопирован")
+            else:
+                results.append(f"  ! Не удалось скопировать KC_mpo.txt - {err}")
+        
+        # Копируем 1po2_1n.cfg
+        if os.path.exists(cfg_path):
+            ok, err = self._scp_copy(name, cfg_path, "/fpo_cfg/1po2_1n.cfg")
+            if ok:
+                results.append("  + 1po2_1n.cfg скопирован в /fpo_cfg")
+            else:
+                results.append(f"  ! Не удалось скопировать 1po2_1n.cfg - {err}")
+        else:
+            results.append("  ! Файл 1po2_1n.cfg отсутствует локально")
+        results.append("")
+        
+        # 5. Настройка окружения на сервере
+        step_num = "4" if mode == "copy" else "4"
+        results.append(f"[{step_num}/6] Настройка окружения на сервере...")
+        
+        remote_setup_cmd = """
+# qconn если не запущен
+if ! pgrep qconn > /dev/null; then
+    su -c "qconn" &
+    sleep 1
+    echo "  + qconn запущен"
+else
+    echo "  + qconn уже работает"
+fi
+
+# Создание /fpo_cfg
+if [ ! -d "/fpo_cfg" ]; then
+    mkdir -p /fpo_cfg
+    echo "  + Создана директория /fpo_cfg"
+else
+    echo "  + Директория /fpo_cfg существует"
+fi
+
+# Проверка файла конфигурации
+if [ -f "/fpo_cfg/1po2_1n.cfg" ]; then
+    echo "  + Файл 1po2_1n.cfg присутствует в /fpo_cfg"
+else
+    echo "  ! Внимание: файл 1po2_1n.cfg отсутствует в /fpo_cfg"
+fi
+
+# Ссылка /fea_hd
+if [ ! -L "/fea_hd" ]; then
+    [ -e "/fea_hd" ] && rm -rf /fea_hd
+    ln -s /fs/ssd0/fea_hd /fea_hd
+    echo "  + Создана ссылка /fea_hd -> /fs/ssd0/fea_hd"
+else
+    echo "  + Ссылка /fea_hd уже существует"
+fi
+
+# Ссылка /tmp_hd
+if [ ! -L "/tmp_hd" ]; then
+    [ -e "/tmp_hd" ] && rm -rf /tmp_hd
+    ln -s /fs/ssd0/tmp_hd /tmp_hd
+    echo "  + Создана ссылка /tmp_hd -> /fs/ssd0/tmp_hd"
+else
+    echo "  + Ссылка /tmp_hd уже существует"
+fi
+
+# Переход в директорию CVS
+cd /home/pkrv/CVS || exit 1
+
+# Обновление символьной ссылки
+if [ -L "1po2_1n" ]; then
+    rm 1po2_1n
+    echo "  + Удалена старая ссылка 1po2_1n"
+fi
+
+ln -s mpo 1po2_1n
+echo "  + Создана ссылка 1po2_1n -> mpo"
+
+# Права на выполнение
+chmod +x mpo
+echo "  + Выданы права на выполнение файлу mpo"
+
+# Синхронизация
+sync
+echo "  + Выполнена синхронизация"
+"""
+        
+        code, stdout, stderr = self._ssh_command(name, remote_setup_cmd, use_tty=False, timeout=30)
+        results.append(stdout)
+        if stderr:
+            results.append(f"  Ошибки: {stderr}")
+        
+        if code != 0:
+            results.append("")
+            results.append("  ОШИБКА: Не удалось выполнить настройку на сервере")
+            return False, "\n".join(results)
+        
+        results.append("")
+        results.append("=== ДЕПЛОЙ ЗАВЕРШЕН УСПЕШНО ===")
+        
+        return True, "\n".join(results)
     
     def diagnose_connection(self, name):
         """Диагностика проблем подключения (с таймаутами)"""
@@ -336,7 +581,8 @@ def main():
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
-            QLineEdit, QMessageBox, QFrame, QTreeWidget, QTreeWidgetItem
+            QLineEdit, QMessageBox, QFrame, QTreeWidget, QTreeWidgetItem,
+            QGroupBox, QRadioButton, QButtonGroup
         )
         from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
         from PyQt5.QtGui import QPixmap, QIcon, QColor, QFont
@@ -477,6 +723,30 @@ def main():
                 finally:
                     self.finished.emit()
         
+        class DeployThread(QThread):
+            """Поток для выполнения деплоя"""
+            result_ready = pyqtSignal(str)
+            status_update = pyqtSignal(str)
+            finished = pyqtSignal()
+            
+            def __init__(self, name, mode, local_dir):
+                super().__init__()
+                self.name = name
+                self.mode = mode
+                self.local_dir = local_dir
+            
+            def run(self):
+                try:
+                    self.status_update.emit(f"Деплой в режиме {self.mode}...")
+                    ok, result = bc.deploy_files(self.name, self.mode, self.local_dir)
+                    self.result_ready.emit(result)
+                    self.status_update.emit("Деплой завершен" if ok else "Деплой провален")
+                except Exception as e:
+                    self.result_ready.emit(f"Ошибка при деплое:\n{str(e)}")
+                    self.status_update.emit(f"Ошибка: {str(e)[:50]}")
+                finally:
+                    self.finished.emit()
+        
         class MainWindow(QMainWindow):
             def __init__(self):
                 super().__init__()
@@ -533,6 +803,7 @@ def main():
                 self.create_files_tab()
                 self.create_op_files_tab()
                 self.create_processes_tab()
+                self.create_deploy_tab()
                 self.create_logs_tab()
                 self.create_diagnostics_tab()
             
@@ -714,6 +985,68 @@ def main():
                 
                 self.tabs.addTab(proc_tab, "ПРОЦЕССЫ")
             
+            def create_deploy_tab(self):
+                """Вкладка деплоя файлов"""
+                deploy_tab = QWidget()
+                deploy_layout = QVBoxLayout(deploy_tab)
+                
+                # Выбор стенда
+                stand_row = QHBoxLayout()
+                stand_row.addStretch()
+                stand_row.addWidget(QLabel("Стенд:"))
+                self.deploy_stand = QComboBox()
+                self.deploy_stand.addItems(["ГОЗ", "Арктика", "C1M"])
+                stand_row.addWidget(self.deploy_stand)
+                stand_row.addStretch()
+                deploy_layout.addLayout(stand_row)
+                
+                # Выбор режима
+                mode_group = QGroupBox("Режим деплоя")
+                mode_layout = QHBoxLayout()
+                self.deploy_mode_move = QRadioButton("Move (переименовать старые)")
+                self.deploy_mode_move.setChecked(True)
+                self.deploy_mode_remove = QRadioButton("Remove (удалить старые)")
+                self.deploy_mode_copy = QRadioButton("Copy (бэкап на локальный ПК)")
+                
+                mode_layout.addWidget(self.deploy_mode_move)
+                mode_layout.addWidget(self.deploy_mode_remove)
+                mode_layout.addWidget(self.deploy_mode_copy)
+                mode_group.setLayout(mode_layout)
+                deploy_layout.addWidget(mode_group)
+                
+                # Путь к локальным файлам
+                path_row = QHBoxLayout()
+                path_row.addWidget(QLabel("Папка с файлами:"))
+                self.deploy_path = QLineEdit(os.getcwd())
+                self.deploy_path.setMinimumWidth(400)
+                path_row.addWidget(self.deploy_path)
+                path_row.addWidget(QPushButton("...", clicked=self.select_deploy_path, maximumWidth=30))
+                deploy_layout.addLayout(path_row)
+                
+                # Кнопки
+                btn_row = QHBoxLayout()
+                btn_row.addStretch()
+                self.deploy_btn = QPushButton("ЗАПУСТИТЬ ДЕПЛОЙ")
+                self.deploy_btn.setMinimumHeight(40)
+                self.deploy_btn.setStyleSheet("background-color: #ff9800; font-size: 14px; font-weight: bold;")
+                self.deploy_btn.clicked.connect(self.run_deploy)
+                btn_row.addWidget(self.deploy_btn)
+                btn_row.addStretch()
+                deploy_layout.addLayout(btn_row)
+                
+                # Вывод лога
+                self.deploy_log = QTextEdit()
+                self.deploy_log.setReadOnly(True)
+                self.deploy_log.setFont(QFont("Consolas", 10))
+                self.deploy_log.setStyleSheet("background: #0d0d1a; color: #00ff00;")
+                deploy_layout.addWidget(self.deploy_log)
+                
+                self.deploy_status = QLabel("Готов к деплою")
+                self.deploy_status.setStyleSheet("color: #888; font-size: 11px;")
+                deploy_layout.addWidget(self.deploy_status)
+                
+                self.tabs.addTab(deploy_tab, "ДЕПЛОЙ")
+            
             def create_logs_tab(self):
                 log_tab = QWidget()
                 log_layout = QVBoxLayout(log_tab)
@@ -751,38 +1084,63 @@ def main():
                 
                 self.tabs.addTab(diag_tab, "ДИАГНОСТИКА")
             
-            def run_diagnostic(self):
-                """Запуск диагностики в отдельном потоке"""
+            def select_deploy_path(self):
+                """Выбор папки с файлами для деплоя"""
+                from PyQt5.QtWidgets import QFileDialog
+                folder = QFileDialog.getExistingDirectory(self, "Выберите папку с файлами mpo, KC_mpo.txt, 1po2_1n.cfg")
+                if folder:
+                    self.deploy_path.setText(folder)
+            
+            def run_deploy(self):
+                """Запуск деплоя"""
+                name = self.deploy_stand.currentText()
+                
+                # Проверка подключения
+                if not bc.stands[name].connected:
+                    QMessageBox.warning(self, "Ошибка", f"Стенд {name} не подключен! Сначала подключитесь к стенду.")
+                    return
+                
+                # Определяем режим
+                if self.deploy_mode_move.isChecked():
+                    mode = "move"
+                elif self.deploy_mode_remove.isChecked():
+                    mode = "remove"
+                else:
+                    mode = "copy"
+                
+                local_dir = self.deploy_path.text()
+                if not os.path.exists(local_dir):
+                    QMessageBox.warning(self, "Ошибка", f"Папка {local_dir} не существует!")
+                    return
+                
                 # Блокируем кнопки
-                self.diag_stand.setEnabled(False)
-                self.diag_btn.setEnabled(False)
-                self.diag_text.clear()
-                self.diag_status.setText("Выполняется диагностика...")
-                self.diag_status.setStyleSheet("color: #ff9800; font-size: 11px;")
+                self.deploy_stand.setEnabled(False)
+                self.deploy_btn.setEnabled(False)
+                self.deploy_log.clear()
+                self.deploy_status.setText(f"Выполняется деплой на {name} в режиме {mode}...")
+                self.deploy_status.setStyleSheet("color: #ff9800; font-size: 11px;")
                 
-                name = self.diag_stand.currentText()
-                
-                # Создаем и запускаем поток диагностики
-                self.diag_thread = DiagnosticThread(name)
-                self.diag_thread.result_ready.connect(self.on_diagnostic_result)
-                self.diag_thread.status_update.connect(self.on_diagnostic_status)
-                self.diag_thread.finished.connect(self.on_diagnostic_finished)
-                self.diag_thread.start()
+                # Запускаем поток деплоя
+                self.deploy_thread = DeployThread(name, mode, local_dir)
+                self.deploy_thread.result_ready.connect(self.on_deploy_result)
+                self.deploy_thread.status_update.connect(self.on_deploy_status)
+                self.deploy_thread.finished.connect(self.on_deploy_finished)
+                self.deploy_thread.start()
             
-            def on_diagnostic_result(self, result):
-                """Получение результата диагностики"""
-                self.diag_text.setText(result)
+            def on_deploy_result(self, result):
+                """Получение результата деплоя"""
+                self.deploy_log.setText(result)
             
-            def on_diagnostic_status(self, status):
-                """Обновление статуса диагностики"""
-                self.diag_status.setText(status)
+            def on_deploy_status(self, status):
+                """Обновление статуса деплоя"""
+                self.deploy_status.setText(status)
             
-            def on_diagnostic_finished(self):
-                """Окончание диагностики"""
-                self.diag_stand.setEnabled(True)
-                self.diag_btn.setEnabled(True)
-                if "Ошибка" not in self.diag_status.text() and "завершена" not in self.diag_status.text():
-                    self.diag_status.setStyleSheet("color: #4caf50; font-size: 11px;")
+            def on_deploy_finished(self):
+                """Окончание деплоя"""
+                self.deploy_stand.setEnabled(True)
+                self.deploy_btn.setEnabled(True)
+                if "УСПЕШНО" in self.deploy_log.toPlainText():
+                    self.deploy_status.setStyleSheet("color: #4caf50; font-size: 11px;")
             
             def setup_timer(self):
                 self.timer = QTimer()
@@ -837,6 +1195,34 @@ def main():
                 bc.disconnect(name)
                 self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Отключен от {name}")
                 self.update_all_cards()
+            
+            def run_diagnostic(self):
+                """Запуск диагностики в отдельном потоке"""
+                self.diag_stand.setEnabled(False)
+                self.diag_btn.setEnabled(False)
+                self.diag_text.clear()
+                self.diag_status.setText("Выполняется диагностика...")
+                self.diag_status.setStyleSheet("color: #ff9800; font-size: 11px;")
+                
+                name = self.diag_stand.currentText()
+                
+                self.diag_thread = DiagnosticThread(name)
+                self.diag_thread.result_ready.connect(self.on_diagnostic_result)
+                self.diag_thread.status_update.connect(self.on_diagnostic_status)
+                self.diag_thread.finished.connect(self.on_diagnostic_finished)
+                self.diag_thread.start()
+            
+            def on_diagnostic_result(self, result):
+                self.diag_text.setText(result)
+            
+            def on_diagnostic_status(self, status):
+                self.diag_status.setText(status)
+            
+            def on_diagnostic_finished(self):
+                self.diag_stand.setEnabled(True)
+                self.diag_btn.setEnabled(True)
+                if "Ошибка" not in self.diag_status.text() and "завершена" not in self.diag_status.text():
+                    self.diag_status.setStyleSheet("color: #4caf50; font-size: 11px;")
             
             # Методы для файлов стендов
             def browse_stand_files(self, path=None):
@@ -971,6 +1357,9 @@ def main():
             QTabWidget::pane { border: 1px solid #3a3a6a; border-radius: 8px; background: #1e1e32; }
             QTabBar::tab { background: #2a2a4a; color: #8a8aaa; padding: 12px 30px; font-weight: bold; font-size: 14px; min-width: 140px; }
             QTabBar::tab:selected { background: #1e1e32; color: #a0b0ff; border-bottom: 3px solid #4a4ad2; }
+            QGroupBox { border: 1px solid #3a3a6a; border-radius: 8px; margin-top: 10px; font-weight: bold; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+            QRadioButton { color: #e0e0e0; spacing: 8px; }
         """)
         
         window = MainWindow()
