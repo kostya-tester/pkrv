@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
 Bench Manager - полностью автономный файл с GUI и картинками.
 Подключение через системный SSH с поддержкой старых алгоритмов.
@@ -10,6 +13,7 @@ import socket
 import threading
 import subprocess
 import argparse
+import shutil
 from datetime import datetime
 
 # ============================================================
@@ -24,6 +28,91 @@ else:
     APP_DIR = BASE_DIR
 
 IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
+
+# ============================================================
+# ПРОВЕРКА SSH-ИНСТРУМЕНТОВ
+# ============================================================
+
+def check_ssh_tools():
+    """Проверяем доступность sshpass и других утилит"""
+    tools = {}
+    
+    # Проверяем sshpass
+    try:
+        subprocess.run(["sshpass", "-V"], capture_output=True, timeout=2)
+        tools["sshpass"] = True
+    except:
+        tools["sshpass"] = False
+    
+    # Проверяем expect
+    try:
+        subprocess.run(["expect", "-v"], capture_output=True, timeout=2)
+        tools["expect"] = True
+    except:
+        tools["expect"] = False
+    
+    # Проверяем обычный ssh
+    try:
+        subprocess.run(["ssh", "-V"], capture_output=True, timeout=2)
+        tools["ssh"] = True
+    except:
+        tools["ssh"] = False
+    
+    return tools
+
+SSH_TOOLS = check_ssh_tools()
+
+# ============================================================
+# КЛАСС ДЛЯ АВТОМАТИЗАЦИИ SSH
+# ============================================================
+
+class SSHAutomator:
+    """Класс для работы с SSH, поддерживающий разные методы авторизации"""
+    
+    def __init__(self):
+        self.password_files = {}
+    
+    def _create_password_file(self, name, password):
+        """Создаёт временный файл с паролем для sshpass"""
+        import tempfile
+        if name not in self.password_files:
+            fd, path = tempfile.mkstemp(prefix=f"sshpass_{name}_", suffix=".txt", text=True)
+            os.close(fd)
+            with open(path, "w") as f:
+                f.write(password)
+            self.password_files[name] = path
+        return self.password_files[name]
+    
+    def _cleanup(self):
+        """Удаляет временные файлы паролей"""
+        for path in self.password_files.values():
+            try:
+                os.unlink(path)
+            except:
+                pass
+        self.password_files.clear()
+    
+    def _get_ssh_options(self, name):
+        """Возвращает опции SSH для конкретного стенда"""
+        basic_opts = (
+            "-o StrictHostKeyChecking=no "
+            "-o UserKnownHostsFile=/dev/null "
+            "-o ConnectTimeout=10 "
+            "-o LogLevel=ERROR"
+        )
+        
+        old_opts = (
+            "-o HostKeyAlgorithms=+ssh-rsa "
+            "-o PubkeyAcceptedKeyTypes=+ssh-rsa "
+            "-o MACs=+hmac-md5,hmac-sha1 "
+            "-o KexAlgorithms=+diffie-hellman-group1-sha1 "
+        )
+        
+        # Старые стенды (ГОЗ, Арктика, C1M) требуют старых алгоритмов
+        if name in ["ГОЗ", "Арктика", "C1M"]:
+            return f"{basic_opts} {old_opts}"
+        else:
+            return basic_opts
 
 # ============================================================
 # КОННЕКТОР СТЕНДОВ
@@ -49,23 +138,14 @@ class BenchConnector:
     
     ORANGEPI = {"ip": "192.168.243.46", "username": "orangepi", "password": "", "type": "Orange Pi"}
     
-    OLD_SSH_OPTS = (
-        "-o HostKeyAlgorithms=+ssh-rsa "
-        "-o PubkeyAcceptedKeyTypes=+ssh-rsa "
-        "-o MACs=+hmac-md5,hmac-sha1 "
-        "-o KexAlgorithms=+diffie-hellman-group1-sha1 "
-        "-o StrictHostKeyChecking=no "
-        "-o LogLevel=ERROR "
-        "-o UserKnownHostsFile=NUL "
-        "-o ConnectTimeout=10"
-    )
-    
-    NORMAL_SSH_OPTS = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ConnectTimeout=5"
-    
     def __init__(self):
         self.stands = {}
         self.monitoring = False
+        self.ssh_automator = SSHAutomator()
         self._init_stands()
+    
+    def __del__(self):
+        self.ssh_automator._cleanup()
     
     def _init_stands(self):
         for name, cfg in self.STANDS.items():
@@ -84,6 +164,7 @@ class BenchConnector:
             return False
     
     def start_monitoring(self):
+        """Запуск мониторинга доступности"""
         if self.monitoring: 
             return
         self.monitoring = True
@@ -101,14 +182,54 @@ class BenchConnector:
     def stop_monitoring(self): 
         self.monitoring = False
 
-    def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=30):
+    def _get_ssh_opts(self, name):
+        """Возвращает опции SSH"""
+        return self.ssh_automator._get_ssh_options(name)
+    
+    def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=30, password=None):
+        """
+        Выполнение SSH команды с автоматической авторизацией.
+        Использует sshpass для передачи пароля.
+        """
         info = self.stands[name]
-        opts = self.OLD_SSH_OPTS if name in self.STANDS else self.NORMAL_SSH_OPTS
+        pwd = password or info.password
+        opts = self._get_ssh_opts(name)
+        
+        # Формируем команду с sshpass
         if use_tty:
-            opts = "-tt " + opts
-        cmd = f'ssh {opts} {info.username}@{info.ip} "{remote_cmd}"'
+            tty_opt = "-tt"
+        else:
+            tty_opt = ""
+        
+        # Используем sshpass если он доступен
+        if SSH_TOOLS.get("sshpass"):
+            cmd = (
+                f'sshpass -p "{pwd}" ssh {opts} {tty_opt} '
+                f'{info.username}@{info.ip} "{remote_cmd}"'
+            )
+        else:
+            # Fallback: используем expect-скрипт
+            expect_script = f'''
+            spawn ssh {opts} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"
+            expect {{
+                "password:" {{ send "{pwd}\\r"; exp_continue }}
+                "yes/no" {{ send "yes\\r"; exp_continue }}
+                eof
+            }}
+            catch wait result
+            exit [lindex $result 3]
+            '''
+            cmd = f'echo "{expect_script}" | expect -f -'
+        
         try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(
+                cmd, 
+                shell=True, 
+                capture_output=True, 
+                text=True, 
+                timeout=timeout,
+                env={**os.environ, 'LANG': 'C', 'LC_ALL': 'C'}
+            )
             out = r.stdout if r.stdout else ""
             err = r.stderr if r.stderr else ""
             return r.returncode, out, err
@@ -118,44 +239,85 @@ class BenchConnector:
             return -1, "", str(e)
     
     def _scp_copy(self, name, local_path, remote_path):
-        """Копирование файла через SCP"""
+        """Копирование файла через SCP с авторизацией"""
         info = self.stands[name]
-        opts = self.OLD_SSH_OPTS if name in self.STANDS else self.NORMAL_SSH_OPTS
-        cmd = f'scp {opts} "{local_path}" {info.username}@{info.ip}:"{remote_path}" 2>&1'
+        opts = self._get_ssh_opts(name)
+        pwd = info.password
+        
+        # Используем sshpass если он доступен
+        if SSH_TOOLS.get("sshpass"):
+            cmd = f'sshpass -p "{pwd}" scp {opts} "{local_path}" {info.username}@{info.ip}:"{remote_path}" 2>&1'
+        else:
+            expect_script = f'''
+            spawn scp {opts} "{local_path}" {info.username}@{info.ip}:"{remote_path}"
+            expect {{
+                "password:" {{ send "{pwd}\\r"; exp_continue }}
+                "yes/no" {{ send "yes\\r"; exp_continue }}
+                eof
+            }}
+            catch wait result
+            exit [lindex $result 3]
+            '''
+            cmd = f'echo "{expect_script}" | expect -f -'
+        
         try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
-            return r.returncode == 0, r.stderr
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+            return r.returncode == 0, r.stderr if r.stderr else r.stdout
         except Exception as e:
             return False, str(e)
 
     def connect(self, name, password=None):
+        """
+        Подключение к стенду с полной авторизацией.
+        Для старых стендов: ssh -> su -> qconn
+        """
         try:
             if name not in self.stands:
                 return False, f"Стенд {name} не найден"
+            
             info = self.stands[name]
             if password is None:
                 password = info.password
-            if not password:
+            
+            if not password and info.username != "root":
                 return False, f"Нет пароля для стенда {name}"
             
+            # Для старых стендов (ГОЗ, Арктика, C1M) нужен su
             if name in self.STANDS:
-                remote_cmd = f"export LANG=C && export LC_ALL=C && echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
-                code, stdout, stderr = self._ssh_command(name, remote_cmd, use_tty=True, timeout=20)
+                # 1. Сначала проверяем SSH доступ
+                test_cmd = "echo SSH_OK"
+                code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10, password=password)
                 
-                if 'OK' in stdout:
+                if code != 0:
+                    if "Permission denied" in stdout or "Permission denied" in stderr:
+                        return False, f"Неверный логин/пароль для {name}@{info.ip}"
+                    return False, f"Не удалось подключиться к {name} ({info.ip})\n{stderr[:200]}"
+                
+                # 2. Выполняем su и qconn
+                connect_cmd = f'echo "{password}" | su -c "qconn; echo SU_OK"'
+                code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=True, timeout=20, password=password)
+                
+                if "SU_OK" in stdout or "Password:" not in stdout:
                     info.connected = True
                     return True, f"Подключен к {name}\n(su + qconn выполнены)"
-                if 'FAIL' in stdout:
-                    return False, "Пароль SSH принят, но su или qconn не сработали."
-                if 'Permission denied' in stdout:
-                    return False, "Неверный логин или пароль."
-                return False, f"Ошибка подключения.\n\n{stdout[-300:]}\n\n{stderr[-300:]}"
+                else:
+                    # Пробуем другой вариант
+                    connect_cmd = f"echo {password} | su -c 'qconn 2>&1; echo SUCCESS'"
+                    code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=True, timeout=20, password=password)
+                    
+                    if "SUCCESS" in stdout:
+                        info.connected = True
+                        return True, f"Подключен к {name} (альтернативный метод)"
+                    
+                    return False, f"Не удалось выполнить su на {name}\nstdout: {stdout[-200:]}\nstderr: {stderr[-200:]}"
             else:
-                code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10)
+                # Для OrangePi и других современных систем
+                code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10, password=password)
                 if 'OK' in stdout:
                     info.connected = True
                     return True, f"Подключен к {name}"
-                return False, f"Ошибка подключения.\n{stdout[-300:]}"
+                return False, f"Ошибка подключения к {name}\n{stdout[-200:]}{stderr[-200:]}"
+                
         except Exception as e:
             return False, f"Критическая ошибка: {str(e)}"
     
@@ -164,12 +326,24 @@ class BenchConnector:
             self.stands[name].connected = False
     
     def execute(self, name, command, timeout=30):
+        """
+        Выполнение команды на стенде.
+        Для старых стендов выполняет команду через su.
+        """
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
+        
         info = self.stands[name]
         pwd = info.password
-        full_cmd = f"export LANG=C && export LC_ALL=C && echo '{pwd}' | su -c 'qconn && {command}'" if name in self.STANDS else command
-        code, stdout, stderr = self._ssh_command(name, full_cmd, use_tty=True, timeout=timeout)
+        
+        if name in self.STANDS:
+            # Для старых стендов выполняем через su
+            full_cmd = f'echo "{pwd}" | su -c "{command}"'
+            code, stdout, stderr = self._ssh_command(name, full_cmd, use_tty=True, timeout=timeout)
+        else:
+            # Для современных систем напрямую
+            code, stdout, stderr = self._ssh_command(name, command, timeout=timeout)
+        
         return code == 0, stdout, stderr
     
     def get_all_info(self):
@@ -178,11 +352,7 @@ class BenchConnector:
                        "type": s.stand_type} for name, s in self.stands.items()}
     
     def deploy_files(self, name, mode="move", local_dir=None):
-        """
-        Деплой файлов на стенд
-        mode: "move" - переименование старых файлов, "remove" - удаление, "copy" - бэкап
-        local_dir - директория с локальными файлами (по умолчанию текущая)
-        """
+        """Деплой файлов на стенд"""
         if name not in self.STANDS:
             return False, f"Стенд {name} не найден"
         
@@ -227,79 +397,53 @@ class BenchConnector:
             os.makedirs(backup_dir, exist_ok=True)
             results.append(f"  + Создана папка для бэкапа: {backup_dir}")
             
-            # Копируем mpo
-            ok, err = self._scp_copy(name, f"{info.username}@{info.ip}:/home/pkrv/CVS/mpo", 
-                                      os.path.join(backup_dir, "mpo").replace("\\", "/"))
-            if ok:
-                results.append("  + mpo скопирован с сервера")
-            else:
-                results.append("  ! mpo не найден на сервере или не удалось скопировать")
+            # Копируем файлы с сервера
+            files_to_backup = [
+                ("/home/pkrv/CVS/mpo", "mpo"),
+                ("/home/pkrv/CVS/KC_mpo.txt", "KC_mpo.txt"),
+                ("/fpo_cfg/1po2_1n.cfg", "1po2_1n.cfg")
+            ]
             
-            # Копируем KC_mpo.txt
-            ok, err = self._scp_copy(name, f"{info.username}@{info.ip}:/home/pkrv/CVS/KC_mpo.txt",
-                                      os.path.join(backup_dir, "KC_mpo.txt").replace("\\", "/"))
-            if ok:
-                results.append("  + KC_mpo.txt скопирован с сервера")
-            else:
-                results.append("  ! KC_mpo.txt не найден на сервере или не удалось скопировать")
-            
-            # Копируем 1po2_1n.cfg
-            ok, err = self._scp_copy(name, f"{info.username}@{info.ip}:/fpo_cfg/1po2_1n.cfg",
-                                      os.path.join(backup_dir, "1po2_1n.cfg").replace("\\", "/"))
-            if ok:
-                results.append("  + 1po2_1n.cfg скопирован с сервера")
-            else:
-                results.append("  ! 1po2_1n.cfg не найден на сервере или не удалось скопировать")
+            for remote_path, local_name in files_to_backup:
+                # Для копирования с сервера используем команду cat через SSH
+                local_file = os.path.join(backup_dir, local_name)
+                cat_cmd = f'cat {remote_path}'
+                ok, stdout, stderr = self.execute(name, cat_cmd, timeout=15)
+                if ok and stdout:
+                    with open(local_file, 'w') as f:
+                        f.write(stdout)
+                    results.append(f"  + {local_name} скопирован с сервера")
+                else:
+                    results.append(f"  ! {local_name} не найден на сервере")
             
             results.append(f"  + Бэкап сохранён в {backup_dir}")
             results.append("")
         
         # 3. Обработка старых файлов на сервере
-        step_num = "2" if mode == "copy" else "2"
-        results.append(f"[{step_num}/6] Подготовка сервера: обработка старых файлов...")
+        step = "3" if mode == "copy" else "2"
+        results.append(f"[{step}/6] Подготовка сервера: обработка старых файлов...")
         
         if mode == "remove":
-            remote_cleanup_cmd = """
-if [ -f /home/pkrv/CVS/mpo ]; then
-    rm -f /home/pkrv/CVS/mpo
-    echo '  Старый файл mpo удалён'
-fi
-if [ -f /home/pkrv/CVS/KC_mpo.txt ]; then
-    rm -f /home/pkrv/CVS/KC_mpo.txt
-    echo '  Старый файл KC_mpo.txt удалён'
-fi
-if [ -f /fpo_cfg/1po2_1n.cfg ]; then
-    rm -f /fpo_cfg/1po2_1n.cfg
-    echo '  Старый файл 1po2_1n.cfg удалён'
-fi
-"""
+            cleanup_cmd = """
+                rm -f /home/pkrv/CVS/mpo /home/pkrv/CVS/KC_mpo.txt /fpo_cfg/1po2_1n.cfg
+                echo "Старые файлы удалены"
+            """
         else:  # move or copy
-            remote_cleanup_cmd = """
-if [ -f /home/pkrv/CVS/mpo ]; then
-    mv /home/pkrv/CVS/mpo /home/pkrv/CVS/mpo_old
-    echo '  Найден старый mpo, переименован в mpo_old'
-else
-    echo '  Старый файл mpo отсутствует'
-fi
-if [ -f /home/pkrv/CVS/KC_mpo.txt ]; then
-    mv /home/pkrv/CVS/KC_mpo.txt /home/pkrv/CVS/KC_mpo.txt_old
-    echo '  Найден старый KC_mpo.txt, переименован в KC_mpo.txt_old'
-fi
-if [ -f /fpo_cfg/1po2_1n.cfg ]; then
-    mv /fpo_cfg/1po2_1n.cfg /fpo_cfg/1po2_1n.cfg_old
-    echo '  Найден старый 1po2_1n.cfg, переименован в 1po2_1n.cfg_old'
-fi
-"""
+            cleanup_cmd = """
+                [ -f /home/pkrv/CVS/mpo ] && mv /home/pkrv/CVS/mpo /home/pkrv/CVS/mpo_old && echo "mpo->mpo_old" || echo "mpo отсутствует"
+                [ -f /home/pkrv/CVS/KC_mpo.txt ] && mv /home/pkrv/CVS/KC_mpo.txt /home/pkrv/CVS/KC_mpo.txt_old && echo "KC_mpo.txt->KC_mpo.txt_old" || echo "KC_mpo.txt отсутствует"
+                [ -f /fpo_cfg/1po2_1n.cfg ] && mv /fpo_cfg/1po2_1n.cfg /fpo_cfg/1po2_1n.cfg_old && echo "cfg->cfg_old" || echo "cfg отсутствует"
+            """
         
-        code, stdout, stderr = self._ssh_command(name, remote_cleanup_cmd, use_tty=False, timeout=15)
-        results.append(stdout)
+        code, stdout, stderr = self.execute(name, cleanup_cmd, timeout=15)
+        results.append(stdout if stdout else "  (пусто)")
         if stderr:
             results.append(f"  Ошибки: {stderr}")
         results.append("")
         
         # 4. Копирование новых файлов
-        step_num = "3" if mode == "copy" else "3"
-        results.append(f"[{step_num}/6] Копирование новых файлов на сервер...")
+        step = "4" if mode == "copy" else "3"
+        results.append(f"[{step}/6] Копирование новых файлов на сервер...")
         
         # Копируем mpo
         ok, err = self._scp_copy(name, mpo_path, "/home/pkrv/CVS/mpo")
@@ -329,75 +473,39 @@ fi
         results.append("")
         
         # 5. Настройка окружения на сервере
-        step_num = "4" if mode == "copy" else "4"
-        results.append(f"[{step_num}/6] Настройка окружения на сервере...")
+        step = "5" if mode == "copy" else "4"
+        results.append(f"[{step}/6] Настройка окружения на сервере...")
         
-        remote_setup_cmd = """
-# qconn если не запущен
-if ! pgrep qconn > /dev/null; then
-    su -c "qconn" &
-    sleep 1
-    echo "  + qconn запущен"
-else
-    echo "  + qconn уже работает"
-fi
-
-# Создание /fpo_cfg
-if [ ! -d "/fpo_cfg" ]; then
-    mkdir -p /fpo_cfg
-    echo "  + Создана директория /fpo_cfg"
-else
-    echo "  + Директория /fpo_cfg существует"
-fi
-
-# Проверка файла конфигурации
-if [ -f "/fpo_cfg/1po2_1n.cfg" ]; then
-    echo "  + Файл 1po2_1n.cfg присутствует в /fpo_cfg"
-else
-    echo "  ! Внимание: файл 1po2_1n.cfg отсутствует в /fpo_cfg"
-fi
-
-# Ссылка /fea_hd
-if [ ! -L "/fea_hd" ]; then
-    [ -e "/fea_hd" ] && rm -rf /fea_hd
-    ln -s /fs/ssd0/fea_hd /fea_hd
-    echo "  + Создана ссылка /fea_hd -> /fs/ssd0/fea_hd"
-else
-    echo "  + Ссылка /fea_hd уже существует"
-fi
-
-# Ссылка /tmp_hd
-if [ ! -L "/tmp_hd" ]; then
-    [ -e "/tmp_hd" ] && rm -rf /tmp_hd
-    ln -s /fs/ssd0/tmp_hd /tmp_hd
-    echo "  + Создана ссылка /tmp_hd -> /fs/ssd0/tmp_hd"
-else
-    echo "  + Ссылка /tmp_hd уже существует"
-fi
-
-# Переход в директорию CVS
-cd /home/pkrv/CVS || exit 1
-
-# Обновление символьной ссылки
-if [ -L "1po2_1n" ]; then
-    rm 1po2_1n
-    echo "  + Удалена старая ссылка 1po2_1n"
-fi
-
-ln -s mpo 1po2_1n
-echo "  + Создана ссылка 1po2_1n -> mpo"
-
-# Права на выполнение
-chmod +x mpo
-echo "  + Выданы права на выполнение файлу mpo"
-
-# Синхронизация
-sync
-echo "  + Выполнена синхронизация"
-"""
+        setup_cmd = """
+            # qconn
+            if ! pgrep qconn > /dev/null; then
+                nohup qconn > /dev/null 2>&1 &
+                sleep 1
+                echo "  + qconn запущен"
+            else
+                echo "  + qconn уже работает"
+            fi
+            
+            # /fpo_cfg
+            [ ! -d "/fpo_cfg" ] && mkdir -p /fpo_cfg && echo "  + Создана /fpo_cfg" || echo "  + /fpo_cfg существует"
+            
+            # проверка конфига
+            [ -f "/fpo_cfg/1po2_1n.cfg" ] && echo "  + cfg в /fpo_cfg" || echo "  ! cfg отсутствует в /fpo_cfg"
+            
+            # ссылки
+            [ ! -L "/fea_hd" ] && { [ -e "/fea_hd" ] && rm -rf /fea_hd; ln -s /fs/ssd0/fea_hd /fea_hd; echo "  + Создана /fea_hd"; } || echo "  + /fea_hd существует"
+            [ ! -L "/tmp_hd" ] && { [ -e "/tmp_hd" ] && rm -rf /tmp_hd; ln -s /fs/ssd0/tmp_hd /tmp_hd; echo "  + Создана /tmp_hd"; } || echo "  + /tmp_hd существует"
+            
+            # CVS
+            cd /home/pkrv/CVS || exit 1
+            [ -L "1po2_1n" ] && rm 1po2_1n && echo "  + Ссылка 1po2_1n удалена"
+            ln -s mpo 1po2_1n && echo "  + Создана ссылка 1po2_1n -> mpo"
+            chmod +x mpo && echo "  + Права на mpo"
+            sync && echo "  + Синхронизация"
+        """
         
-        code, stdout, stderr = self._ssh_command(name, remote_setup_cmd, use_tty=False, timeout=30)
-        results.append(stdout)
+        code, stdout, stderr = self.execute(name, setup_cmd, timeout=30)
+        results.append(stdout if stdout else "  (пусто)")
         if stderr:
             results.append(f"  Ошибки: {stderr}")
         
@@ -406,131 +514,72 @@ echo "  + Выполнена синхронизация"
             results.append("  ОШИБКА: Не удалось выполнить настройку на сервере")
             return False, "\n".join(results)
         
+        # 6. Финальная проверка
+        step = "6" if mode == "copy" else "5"
+        results.append(f"[{step}/6] Финальная проверка...")
+        
+        check_cmd = """
+            echo "=== Проверка ==="
+            ls -la /home/pkrv/CVS/mpo /home/pkrv/CVS/1po2_1n 2>&1
+            file /home/pkrv/CVS/mpo
+        """
+        code, stdout, stderr = self.execute(name, check_cmd, timeout=15)
+        results.append(stdout if stdout else "  (пусто)")
         results.append("")
+        
         results.append("=== ДЕПЛОЙ ЗАВЕРШЕН УСПЕШНО ===")
         
         return True, "\n".join(results)
     
     def diagnose_connection(self, name):
-        """Диагностика проблем подключения (с таймаутами)"""
+        """Диагностика проблем подключения"""
         results = []
-        
-        # 1. Проверка сети
         info = self.stands[name]
+        
         results.append(f"=== Диагностика {name} ({info.ip}) ===")
         results.append(f"Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        results.append(f"SSH инструменты: sshpass={'✓' if SSH_TOOLS.get('sshpass') else '✗'}, expect={'✓' if SSH_TOOLS.get('expect') else '✗'}")
         results.append("")
         
-        # Ping с таймаутом
+        # 1. Ping
+        results.append("--- Сеть ---")
         try:
-            if sys.platform == "win32":
-                ping_result = subprocess.run(
-                    f"ping -n 1 -w 2000 {info.ip}",
-                    shell=True, 
-                    capture_output=True, 
-                    text=True, 
-                    timeout=3
-                )
-            else:
-                ping_result = subprocess.run(
-                    f"ping -c 1 -W 2 {info.ip}",
-                    shell=True, 
-                    capture_output=True, 
-                    text=True, 
-                    timeout=3
-                )
-            
-            if ping_result.returncode == 0:
-                results.append("  Ping: OK")
-            else:
-                results.append("  Ping: FAIL (хост не отвечает)")
-        except subprocess.TimeoutExpired:
+            ping_param = "-n 1 -w 2000" if sys.platform == "win32" else "-c 1 -W 2"
+            ping = subprocess.run(f"ping {ping_param} {info.ip}", shell=True, capture_output=True, text=True, timeout=3)
+            results.append(f"  Ping: {'OK' if ping.returncode == 0 else 'FAIL'}")
+        except:
             results.append("  Ping: TIMEOUT")
-        except Exception as e:
-            results.append(f"  Ping: ERROR - {str(e)}")
         
-        # Проверка SSH порта
+        # 2. SSH порт
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2)
-            port_result = sock.connect_ex((info.ip, 22))
+            port = sock.connect_ex((info.ip, 22))
             sock.close()
-            if port_result == 0:
-                results.append("  Port 22: OPEN")
+            results.append(f"  Port 22: {'OPEN' if port == 0 else f'CLOSED (код: {port})'}")
+        except:
+            results.append("  Port 22: ERROR")
+        
+        # 3. SSH тест
+        results.append("")
+        results.append("--- SSH ---")
+        test_cmd = "echo SSH_OK"
+        code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10)
+        if "SSH_OK" in stdout:
+            results.append("  SSH: OK")
+        else:
+            results.append(f"  SSH: FAIL\n  stdout: {stdout[:100]}\n  stderr: {stderr[:100]}")
+        
+        # 4. su тест (для старых стендов)
+        if name in self.STANDS:
+            results.append("")
+            results.append("--- su ---")
+            su_cmd = f'echo "{info.password}" | su -c "whoami"'
+            code, stdout, stderr = self._ssh_command(name, su_cmd, use_tty=True, timeout=10)
+            if "root" in stdout:
+                results.append("  su: OK (root)")
             else:
-                results.append(f"  Port 22: CLOSED (код: {port_result})")
-        except Exception as e:
-            results.append(f"  Port 22: ERROR - {str(e)}")
-        
-        results.append("")
-        results.append("--- SSH подключение ---")
-        
-        # 2. Проверка SSH с разными опциями
-        cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "exit 0" 2>&1'
-        try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=8)
-            if r.returncode == 0:
-                results.append("  SSH (OLD): OK")
-            else:
-                error_msg = r.stderr[:100] if r.stderr else r.stdout[:100]
-                results.append(f"  SSH (OLD): FAIL - {error_msg}")
-        except subprocess.TimeoutExpired:
-            results.append("  SSH (OLD): TIMEOUT")
-        except Exception as e:
-            results.append(f"  SSH (OLD): ERROR - {str(e)}")
-        
-        results.append("")
-        results.append("--- Авторизация ---")
-        
-        # 3. Проверка su с паролем (только для основных стендов)
-        if name in self.STANDS:
-            cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'whoami\' 2>&1"'
-            try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-                if "root" in r.stdout:
-                    results.append("  su: OK (получен root)")
-                else:
-                    out_part = r.stdout[:100] if r.stdout else ""
-                    err_part = r.stderr[:100] if r.stderr else ""
-                    results.append(f"  su: FAIL - {out_part} {err_part}")
-            except subprocess.TimeoutExpired:
-                results.append("  su: TIMEOUT")
-            except Exception as e:
-                results.append(f"  su: ERROR - {str(e)}")
-        
-        results.append("")
-        results.append("--- Проверка qconn ---")
-        
-        # 4. Проверка qconn
-        if name in self.STANDS:
-            cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'which qconn\' 2>&1"'
-            try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-                if r.stdout.strip():
-                    results.append(f"  qconn: FOUND ({r.stdout.strip()[:50]})")
-                else:
-                    results.append("  qconn: NOT FOUND")
-            except subprocess.TimeoutExpired:
-                results.append("  qconn: TIMEOUT")
-            except Exception as e:
-                results.append(f"  qconn: ERROR - {str(e)}")
-        
-        results.append("")
-        results.append("--- Проверка целевой папки ---")
-        
-        # 5. Проверка доступа к папке CVS
-        if name in self.STANDS:
-            cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'test -d /home/pkrv/CVS && echo OK || echo FAIL\' 2>&1"'
-            try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-                if "OK" in r.stdout:
-                    results.append("  CVS папка: OK")
-                else:
-                    results.append(f"  CVS папка: FAIL - {r.stderr[:80]}")
-            except subprocess.TimeoutExpired:
-                results.append("  CVS папка: TIMEOUT")
-            except Exception as e:
-                results.append(f"  CVS папка: ERROR - {str(e)}")
+                results.append(f"  su: FAIL\n  stdout: {stdout[:100]}\n  stderr: {stderr[:100]}")
         
         results.append("")
         results.append("=== ДИАГНОСТИКА ЗАВЕРШЕНА ===")
@@ -556,10 +605,23 @@ def main():
     parser.add_argument('--console', '-c', action='store_true')
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--version', '-v', action='store_true')
+    parser.add_argument('--info', action='store_true', help='Показать информацию об SSH инструментах')
     args = parser.parse_args()
     
     if args.version:
-        print("Bench Manager v1.0.0")
+        print("Bench Manager v2.0.0")
+        return
+    
+    if args.info:
+        print("=== SSH Инструменты ===")
+        for tool, available in SSH_TOOLS.items():
+            print(f"  {tool}: {'✓ Доступен' if available else '✗ Недоступен'}")
+        if not SSH_TOOLS.get('sshpass') and not SSH_TOOLS.get('expect'):
+            print("\n⚠️ Нет инструментов для автоматической авторизации!")
+            print("Установите sshpass:")
+            print("  Linux: apt-get install sshpass")
+            print("  macOS: brew install hudochenkov/sshpass/sshpass")
+            print("  Windows: используйте WSL или установите sshpass через MSYS2")
         return
     
     bc = BenchConnector()
@@ -567,13 +629,18 @@ def main():
     
     if args.check or args.console:
         time.sleep(3)
+        print("=== Доступные стенды ===")
         for name, info in bc.get_all_info().items():
             s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
             print(f"  {name:12} | {info['ip']:16} | {s}")
+        
         if args.console:
+            print("\n=== Подключение к стендам ===")
             for n in ["ГОЗ", "Арктика", "C1M"]:
+                print(f"\n{n}:")
                 ok, msg = bc.connect(n)
-                print(f"{n}: {msg}")
+                print(f"  {'✓' if ok else '✗'} {msg}")
+        
         bc.stop_monitoring()
         return
     
@@ -990,60 +1057,57 @@ def main():
                 deploy_tab = QWidget()
                 deploy_layout = QVBoxLayout(deploy_tab)
                 
-                # Выбор стенда
+                # Selection group
+                sel_group = QGroupBox("Параметры деплоя")
+                sel_layout = QVBoxLayout()
+                
+                # Stand selection
                 stand_row = QHBoxLayout()
-                stand_row.addStretch()
                 stand_row.addWidget(QLabel("Стенд:"))
                 self.deploy_stand = QComboBox()
                 self.deploy_stand.addItems(["ГОЗ", "Арктика", "C1M"])
                 stand_row.addWidget(self.deploy_stand)
                 stand_row.addStretch()
-                deploy_layout.addLayout(stand_row)
+                sel_layout.addLayout(stand_row)
                 
-                # Выбор режима
-                mode_group = QGroupBox("Режим деплоя")
-                mode_layout = QHBoxLayout()
-                self.deploy_mode_move = QRadioButton("Move (переименовать старые)")
-                self.deploy_mode_move.setChecked(True)
-                self.deploy_mode_remove = QRadioButton("Remove (удалить старые)")
-                self.deploy_mode_copy = QRadioButton("Copy (бэкап на локальный ПК)")
+                # Mode selection
+                mode_row = QHBoxLayout()
+                mode_row.addWidget(QLabel("Режим:"))
+                self.deploy_mode = QComboBox()
+                self.deploy_mode.addItems(["move (переименовать старые)", "remove (удалить старые)", "copy (бэкап на ПК)"])
+                mode_row.addWidget(self.deploy_mode)
+                mode_row.addStretch()
+                sel_layout.addLayout(mode_row)
                 
-                mode_layout.addWidget(self.deploy_mode_move)
-                mode_layout.addWidget(self.deploy_mode_remove)
-                mode_layout.addWidget(self.deploy_mode_copy)
-                mode_group.setLayout(mode_layout)
-                deploy_layout.addWidget(mode_group)
-                
-                # Путь к локальным файлам
+                # Path
                 path_row = QHBoxLayout()
                 path_row.addWidget(QLabel("Папка с файлами:"))
                 self.deploy_path = QLineEdit(os.getcwd())
-                self.deploy_path.setMinimumWidth(400)
                 path_row.addWidget(self.deploy_path)
-                path_row.addWidget(QPushButton("...", clicked=self.select_deploy_path, maximumWidth=30))
-                deploy_layout.addLayout(path_row)
+                browse_btn = QPushButton("Обзор")
+                browse_btn.clicked.connect(self.browse_deploy_path)
+                path_row.addWidget(browse_btn)
+                sel_layout.addLayout(path_row)
                 
-                # Кнопки
-                btn_row = QHBoxLayout()
-                btn_row.addStretch()
-                self.deploy_btn = QPushButton("ЗАПУСТИТЬ ДЕПЛОЙ")
-                self.deploy_btn.setMinimumHeight(40)
-                self.deploy_btn.setStyleSheet("background-color: #ff9800; font-size: 14px; font-weight: bold;")
-                self.deploy_btn.clicked.connect(self.run_deploy)
-                btn_row.addWidget(self.deploy_btn)
-                btn_row.addStretch()
-                deploy_layout.addLayout(btn_row)
+                sel_group.setLayout(sel_layout)
+                deploy_layout.addWidget(sel_group)
                 
-                # Вывод лога
+                # Log
                 self.deploy_log = QTextEdit()
                 self.deploy_log.setReadOnly(True)
                 self.deploy_log.setFont(QFont("Consolas", 10))
                 self.deploy_log.setStyleSheet("background: #0d0d1a; color: #00ff00;")
                 deploy_layout.addWidget(self.deploy_log)
                 
-                self.deploy_status = QLabel("Готов к деплою")
-                self.deploy_status.setStyleSheet("color: #888; font-size: 11px;")
-                deploy_layout.addWidget(self.deploy_status)
+                # Buttons
+                btn_row = QHBoxLayout()
+                btn_row.addStretch()
+                self.deploy_btn = QPushButton("ЗАПУСТИТЬ ДЕПЛОЙ")
+                self.deploy_btn.setStyleSheet("background-color: #ff9800; font-size: 14px; font-weight: bold; padding: 12px 30px;")
+                self.deploy_btn.clicked.connect(self.run_deploy)
+                btn_row.addWidget(self.deploy_btn)
+                btn_row.addStretch()
+                deploy_layout.addLayout(btn_row)
                 
                 self.tabs.addTab(deploy_tab, "ДЕПЛОЙ")
             
@@ -1056,91 +1120,44 @@ def main():
                 self.log_text.setStyleSheet("background: #0d0d1a; color: #00ff00; font-family: Consolas;")
                 log_layout.addWidget(self.log_text)
                 
-                log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: self.log_text.clear()))
+                clear_btn = QPushButton("ОЧИСТИТЬ")
+                clear_btn.clicked.connect(self.log_text.clear)
+                log_layout.addWidget(clear_btn)
                 
                 self.tabs.addTab(log_tab, "ЛОГИ")
             
             def create_diagnostics_tab(self):
-                """Вкладка диагностики"""
                 diag_tab = QWidget()
                 diag_layout = QVBoxLayout(diag_tab)
                 
+                # Stand selection
+                sel_row = QHBoxLayout()
+                sel_row.addStretch()
+                sel_row.addWidget(QLabel("Стенд:"))
                 self.diag_stand = QComboBox()
                 self.diag_stand.addItems(["ГОЗ", "Арктика", "C1M", "OrangePi"])
-                diag_layout.addWidget(self.diag_stand)
+                sel_row.addWidget(self.diag_stand)
+                sel_row.addStretch()
+                diag_layout.addLayout(sel_row)
                 
+                # Log
                 self.diag_text = QTextEdit()
                 self.diag_text.setReadOnly(True)
                 self.diag_text.setFont(QFont("Consolas", 10))
+                self.diag_text.setStyleSheet("background: #0d0d1a; color: #00ff00;")
                 diag_layout.addWidget(self.diag_text)
                 
-                self.diag_status = QLabel("Готов к диагностике")
-                self.diag_status.setStyleSheet("color: #888; font-size: 11px;")
-                diag_layout.addWidget(self.diag_status)
-                
+                # Buttons
+                btn_row = QHBoxLayout()
+                btn_row.addStretch()
                 self.diag_btn = QPushButton("ЗАПУСТИТЬ ДИАГНОСТИКУ")
+                self.diag_btn.setStyleSheet("background-color: #2196f3; font-size: 14px; font-weight: bold; padding: 12px 30px;")
                 self.diag_btn.clicked.connect(self.run_diagnostic)
-                diag_layout.addWidget(self.diag_btn)
+                btn_row.addWidget(self.diag_btn)
+                btn_row.addStretch()
+                diag_layout.addLayout(btn_row)
                 
                 self.tabs.addTab(diag_tab, "ДИАГНОСТИКА")
-            
-            def select_deploy_path(self):
-                """Выбор папки с файлами для деплоя"""
-                from PyQt5.QtWidgets import QFileDialog
-                folder = QFileDialog.getExistingDirectory(self, "Выберите папку с файлами mpo, KC_mpo.txt, 1po2_1n.cfg")
-                if folder:
-                    self.deploy_path.setText(folder)
-            
-            def run_deploy(self):
-                """Запуск деплоя"""
-                name = self.deploy_stand.currentText()
-                
-                # Проверка подключения
-                if not bc.stands[name].connected:
-                    QMessageBox.warning(self, "Ошибка", f"Стенд {name} не подключен! Сначала подключитесь к стенду.")
-                    return
-                
-                # Определяем режим
-                if self.deploy_mode_move.isChecked():
-                    mode = "move"
-                elif self.deploy_mode_remove.isChecked():
-                    mode = "remove"
-                else:
-                    mode = "copy"
-                
-                local_dir = self.deploy_path.text()
-                if not os.path.exists(local_dir):
-                    QMessageBox.warning(self, "Ошибка", f"Папка {local_dir} не существует!")
-                    return
-                
-                # Блокируем кнопки
-                self.deploy_stand.setEnabled(False)
-                self.deploy_btn.setEnabled(False)
-                self.deploy_log.clear()
-                self.deploy_status.setText(f"Выполняется деплой на {name} в режиме {mode}...")
-                self.deploy_status.setStyleSheet("color: #ff9800; font-size: 11px;")
-                
-                # Запускаем поток деплоя
-                self.deploy_thread = DeployThread(name, mode, local_dir)
-                self.deploy_thread.result_ready.connect(self.on_deploy_result)
-                self.deploy_thread.status_update.connect(self.on_deploy_status)
-                self.deploy_thread.finished.connect(self.on_deploy_finished)
-                self.deploy_thread.start()
-            
-            def on_deploy_result(self, result):
-                """Получение результата деплоя"""
-                self.deploy_log.setText(result)
-            
-            def on_deploy_status(self, status):
-                """Обновление статуса деплоя"""
-                self.deploy_status.setText(status)
-            
-            def on_deploy_finished(self):
-                """Окончание деплоя"""
-                self.deploy_stand.setEnabled(True)
-                self.deploy_btn.setEnabled(True)
-                if "УСПЕШНО" in self.deploy_log.toPlainText():
-                    self.deploy_status.setStyleSheet("color: #4caf50; font-size: 11px;")
             
             def setup_timer(self):
                 self.timer = QTimer()
@@ -1156,12 +1173,13 @@ def main():
                         is_connecting = self.connecting_states.get(name, False)
                         card.update_status(stand.status, stand.connected, is_connecting)
                 
-                # Обновляем статус в хедере
+                # Update header status
                 online = sum(1 for s in bc.stands.values() if s.status == "online")
                 connected = sum(1 for s in bc.stands.values() if s.connected)
                 self.status_label.setText(f"ONLINE: {online}/4 | CONNECTED: {connected}")
             
             def connect_stand(self, name):
+                """Подключение к стенду"""
                 info = bc.stands[name]
                 if info.status != "online":
                     QMessageBox.warning(self, "Ошибка", f"Стенд {name} не в сети!")
@@ -1173,7 +1191,6 @@ def main():
                 self.connecting_states[name] = True
                 self.update_all_cards()
                 
-                # Запускаем поток подключения
                 self.connect_thread = ConnectThread(name)
                 self.connect_thread.finished.connect(self.on_connect_finished)
                 self.connect_thread.start()
@@ -1187,162 +1204,238 @@ def main():
                     self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Подключен к {name}")
                 else:
                     QMessageBox.critical(self, "Ошибка подключения", msg)
-                    self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка подключения к {name}: {msg}")
+                    self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка подключения к {name}: {msg[:100]}")
                 
                 self.update_all_cards()
             
             def disconnect_stand(self, name):
+                """Отключение от стенда"""
                 bc.disconnect(name)
                 self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Отключен от {name}")
                 self.update_all_cards()
             
             def run_diagnostic(self):
-                """Запуск диагностики в отдельном потоке"""
-                self.diag_stand.setEnabled(False)
+                """Запуск диагностики"""
                 self.diag_btn.setEnabled(False)
+                self.diag_stand.setEnabled(False)
                 self.diag_text.clear()
-                self.diag_status.setText("Выполняется диагностика...")
-                self.diag_status.setStyleSheet("color: #ff9800; font-size: 11px;")
                 
                 name = self.diag_stand.currentText()
+                self.diag_btn.setText("ДИАГНОСТИКА ВЫПОЛНЯЕТСЯ...")
                 
                 self.diag_thread = DiagnosticThread(name)
-                self.diag_thread.result_ready.connect(self.on_diagnostic_result)
-                self.diag_thread.status_update.connect(self.on_diagnostic_status)
-                self.diag_thread.finished.connect(self.on_diagnostic_finished)
+                self.diag_thread.result_ready.connect(self.diag_text.setText)
+                self.diag_thread.finished.connect(self.on_diag_finished)
                 self.diag_thread.start()
             
-            def on_diagnostic_result(self, result):
-                self.diag_text.setText(result)
-            
-            def on_diagnostic_status(self, status):
-                self.diag_status.setText(status)
-            
-            def on_diagnostic_finished(self):
-                self.diag_stand.setEnabled(True)
+            def on_diag_finished(self):
+                """Окончание диагностики"""
+                self.diag_btn.setText("ЗАПУСТИТЬ ДИАГНОСТИКУ")
                 self.diag_btn.setEnabled(True)
-                if "Ошибка" not in self.diag_status.text() and "завершена" not in self.diag_status.text():
-                    self.diag_status.setStyleSheet("color: #4caf50; font-size: 11px;")
+                self.diag_stand.setEnabled(True)
             
-            # Методы для файлов стендов
+            def run_deploy(self):
+                """Запуск деплоя"""
+                name = self.deploy_stand.currentText()
+                
+                if not bc.stands[name].connected:
+                    QMessageBox.warning(self, "Ошибка", f"Стенд {name} не подключен! Сначала подключитесь к стенду.")
+                    return
+                
+                # Get mode
+                mode_map = {
+                    "move (переименовать старые)": "move",
+                    "remove (удалить старые)": "remove",
+                    "copy (бэкап на ПК)": "copy"
+                }
+                mode = mode_map.get(self.deploy_mode.currentText(), "move")
+                
+                local_dir = self.deploy_path.text().strip()
+                if not os.path.exists(local_dir):
+                    QMessageBox.warning(self, "Ошибка", f"Папка {local_dir} не существует!")
+                    return
+                
+                # Disable buttons
+                self.deploy_btn.setEnabled(False)
+                self.deploy_stand.setEnabled(False)
+                self.deploy_mode.setEnabled(False)
+                self.deploy_path.setEnabled(False)
+                self.deploy_log.clear()
+                self.deploy_btn.setText("ДЕПЛОЙ ВЫПОЛНЯЕТСЯ...")
+                
+                self.deploy_thread = DeployThread(name, mode, local_dir)
+                self.deploy_thread.result_ready.connect(self.deploy_log.setText)
+                self.deploy_thread.finished.connect(self.on_deploy_finished)
+                self.deploy_thread.start()
+            
+            def on_deploy_finished(self):
+                """Окончание деплоя"""
+                self.deploy_btn.setText("ЗАПУСТИТЬ ДЕПЛОЙ")
+                self.deploy_btn.setEnabled(True)
+                self.deploy_stand.setEnabled(True)
+                self.deploy_mode.setEnabled(True)
+                self.deploy_path.setEnabled(True)
+            
+            def browse_deploy_path(self):
+                """Выбор папки для деплоя"""
+                from PyQt5.QtWidgets import QFileDialog
+                folder = QFileDialog.getExistingDirectory(
+                    self, 
+                    "Выберите папку с файлами mpo, KC_mpo.txt, 1po2_1n.cfg",
+                    self.deploy_path.text()
+                )
+                if folder:
+                    self.deploy_path.setText(folder)
+            
             def browse_stand_files(self, path=None):
+                """Просмотр файлов на стенде"""
                 if path:
                     self.files_path.setText(path)
+                
                 name = self.files_stand.currentText()
                 path = self.files_path.text().strip() or "/"
                 
-                if name in bc.stands and bc.stands[name].connected:
-                    self.files_tree.clear()
-                    ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
-                    if ok:
-                        for line in out.split('\n'):
-                            if line.startswith('total') or not line.strip():
+                if name not in bc.stands or not bc.stands[name].connected:
+                    self.files_log.setText(f"⚠ Стенд {name} не подключен")
+                    return
+                
+                self.files_tree.clear()
+                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                
+                if ok:
+                    for line in out.split('\n'):
+                        if line.startswith('total') or not line.strip():
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 8:
+                            fname = ' '.join(parts[7:])
+                            if fname in ['.', '..']:
                                 continue
-                            parts = line.split()
-                            if len(parts) >= 8:
-                                fname = ' '.join(parts[7:])
-                                if fname in ['.', '..']:
-                                    continue
-                                is_dir = line.startswith('d')
-                                item = QTreeWidgetItem([
-                                    fname, 
-                                    parts[4] if not is_dir else "", 
-                                    "Папка" if is_dir else "Файл", 
-                                    f"{parts[5]} {parts[6]}" if len(parts) > 6 else ""
-                                ])
-                                if is_dir:
-                                    item.setForeground(0, QColor("#61dafb"))
-                                self.files_tree.addTopLevelItem(item)
-                        self.files_log.append(f"[OK] {path}")
-                    else:
-                        self.files_log.append(f"[ОШИБКА] {err}")
+                            is_dir = line.startswith('d')
+                            is_link = '->' in line
+                            
+                            item = QTreeWidgetItem([
+                                fname, 
+                                parts[4] if not is_dir else "", 
+                                "Папка" if is_dir else ("Ссылка" if is_link else "Файл"), 
+                                f"{parts[5]} {parts[6]}" if len(parts) > 6 else ""
+                            ])
+                            
+                            if is_dir:
+                                item.setForeground(0, QColor("#61dafb"))
+                            elif is_link:
+                                item.setForeground(0, QColor("#90ee90"))
+                            
+                            self.files_tree.addTopLevelItem(item)
+                    
+                    self.files_log.setText(f"✓ {path}")
                 else:
-                    self.files_log.append(f"Стенд {name} не подключен")
+                    self.files_log.setText(f"✗ Ошибка: {err[:100]}")
             
             def cd_stand_folder(self):
+                """Переход в выбранную папку"""
                 item = self.files_tree.currentItem()
                 if item and item.text(2) == "Папка":
-                    self.files_path.setText(f"{self.files_path.text().rstrip('/')}/{item.text(0)}")
+                    current_path = self.files_path.text().rstrip('/')
+                    self.files_path.setText(f"{current_path}/{item.text(0)}")
                     self.browse_stand_files()
             
             def up_stand(self):
+                """Переход на уровень вверх"""
                 cur = self.files_path.text().rstrip('/')
                 if cur != '/':
-                    self.files_path.setText(os.path.dirname(cur) or '/')
+                    parent = os.path.dirname(cur) or '/'
+                    self.files_path.setText(parent)
                     self.browse_stand_files()
             
-            # Методы для файлов OrangePi
             def browse_op(self):
+                """Просмотр файлов на OrangePi"""
                 name = self.op_stand.currentText()
                 path = self.op_path.text().strip() or "/"
                 
-                if name in bc.stands and bc.stands[name].connected:
-                    self.op_tree.clear()
-                    ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
-                    if ok:
-                        for line in out.split('\n'):
-                            if line.startswith('total') or not line.strip():
+                if name not in bc.stands or not bc.stands[name].connected:
+                    self.op_log.setText(f"⚠ Стенд {name} не подключен")
+                    return
+                
+                self.op_tree.clear()
+                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                
+                if ok:
+                    for line in out.split('\n'):
+                        if line.startswith('total') or not line.strip():
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 8:
+                            fname = ' '.join(parts[7:])
+                            if fname in ['.', '..']:
                                 continue
-                            parts = line.split()
-                            if len(parts) >= 8:
-                                fname = ' '.join(parts[7:])
-                                if fname in ['.', '..']:
-                                    continue
-                                is_dir = line.startswith('d')
-                                item = QTreeWidgetItem([
-                                    fname, 
-                                    parts[4] if not is_dir else "", 
-                                    "Папка" if is_dir else "Файл", 
-                                    f"{parts[5]} {parts[6]}" if len(parts) > 6 else ""
-                                ])
-                                if is_dir:
-                                    item.setForeground(0, QColor("#61dafb"))
-                                self.op_tree.addTopLevelItem(item)
-                        self.op_log.append(f"[OK] {path}")
-                    else:
-                        self.op_log.append(f"[ОШИБКА] {err}")
+                            is_dir = line.startswith('d')
+                            
+                            item = QTreeWidgetItem([
+                                fname, 
+                                parts[4] if not is_dir else "", 
+                                "Папка" if is_dir else "Файл", 
+                                f"{parts[5]} {parts[6]}" if len(parts) > 6 else ""
+                            ])
+                            
+                            if is_dir:
+                                item.setForeground(0, QColor("#61dafb"))
+                            
+                            self.op_tree.addTopLevelItem(item)
+                    
+                    self.op_log.setText(f"✓ {path}")
                 else:
-                    self.op_log.append(f"Стенд {name} не подключен")
+                    self.op_log.setText(f"✗ Ошибка: {err[:100]}")
             
             def cd_op(self):
+                """Переход в выбранную папку на OrangePi"""
                 item = self.op_tree.currentItem()
                 if item and item.text(2) == "Папка":
-                    self.op_path.setText(f"{self.op_path.text().rstrip('/')}/{item.text(0)}")
+                    current_path = self.op_path.text().rstrip('/')
+                    self.op_path.setText(f"{current_path}/{item.text(0)}")
                     self.browse_op()
             
             def up_op(self):
+                """Переход на уровень вверх на OrangePi"""
                 cur = self.op_path.text().rstrip('/')
                 if cur != '/':
-                    self.op_path.setText(os.path.dirname(cur) or '/')
+                    parent = os.path.dirname(cur) or '/'
+                    self.op_path.setText(parent)
                     self.browse_op()
             
-            # Методы для процессов
-            def log_proc(self, msg):
-                self.proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-            
             def start_process(self):
+                """Запуск процесса на стенде"""
                 n = self.proc_stand.currentText()
                 if bc.stands[n].connected:
-                    ok, out, err = bc.execute(n, "cd /home/pkrv/fpo_cfg && nohup ./1po2_1n > /dev/null 2>&1 & echo $!")
+                    ok, out, err = bc.execute(
+                        n, 
+                        "cd /home/pkrv/fpo_cfg && nohup ./1po2_1n > /dev/null 2>&1 & echo PID: $!"
+                    )
                     if ok:
-                        self.log_proc(f"{n}: запущен PID: {out.strip()}")
+                        self.proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ {n}: процесс запущен ({out.strip()})")
                     else:
-                        self.log_proc(f"{n}: Ошибка - {err}")
+                        self.proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ✗ {n}: {err[:100]}")
                 else:
-                    self.log_proc(f"{n}: Нет подключения")
+                    self.proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ {n}: не подключен")
             
             def stop_process(self):
+                """Остановка процесса на стенде"""
                 n = self.proc_stand.currentText()
                 if bc.stands[n].connected:
-                    bc.execute(n, "pkill -f 1po2_1n; slay 1po2_1n 2>/dev/null")
-                    self.log_proc(f"{n}: остановлен")
+                    ok, out, err = bc.execute(n, "pkill -f 1po2_1n 2>&1; slay 1po2_1n 2>&1; echo DONE")
+                    self.proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ✓ {n}: процесс остановлен")
                 else:
-                    self.log_proc(f"{n}: Нет подключения")
+                    self.proc_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠ {n}: не подключен")
             
             def restart_process(self):
+                """Перезапуск процесса"""
                 self.stop_process()
-                time.sleep(1)
+                time.sleep(2)
                 self.start_process()
+        
+        # ========================================================
+        # ЗАПУСК GUI
+        # ========================================================
         
         app = QApplication(sys.argv)
         
@@ -1350,16 +1443,38 @@ def main():
         if logo_p:
             app.setWindowIcon(QIcon(logo_p))
         
+        # Глобальная тема
         app.setStyleSheet("""
             QWidget { background-color: #1a1a2e; color: #e0e0e0; font-size: 13px; }
             QPushButton { background-color: #4a4ad2; color: white; border: none; border-radius: 6px; padding: 10px 18px; font-weight: bold; }
             QPushButton:hover { background-color: #5a5ae2; }
+            QPushButton:disabled { background-color: #555; color: #999; }
             QTabWidget::pane { border: 1px solid #3a3a6a; border-radius: 8px; background: #1e1e32; }
             QTabBar::tab { background: #2a2a4a; color: #8a8aaa; padding: 12px 30px; font-weight: bold; font-size: 14px; min-width: 140px; }
             QTabBar::tab:selected { background: #1e1e32; color: #a0b0ff; border-bottom: 3px solid #4a4ad2; }
-            QGroupBox { border: 1px solid #3a3a6a; border-radius: 8px; margin-top: 10px; font-weight: bold; }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
-            QRadioButton { color: #e0e0e0; spacing: 8px; }
+            QGroupBox { border: 1px solid #3a3a6a; border-radius: 8px; margin-top: 10px; font-weight: bold; padding-top: 15px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #a0b0ff; }
+            QComboBox { background: #2a2a4a; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 4px; padding: 5px 10px; min-width: 150px; }
+            QComboBox:hover { border-color: #4a4ad2; }
+            QLineEdit { background: #2a2a4a; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 4px; padding: 5px 10px; }
+            QLineEdit:hover { border-color: #4a4ad2; }
+            QTreeWidget { background: #1e1e32; color: #e0e0e0; border: 1px solid #3a3a6a; border-radius: 5px; }
+            QTreeWidget::item:hover { background: #2a2a4a; }
+            QTreeWidget::item:selected { background: #3a3a6a; color: #a0b0ff; }
+            QHeaderView::section { background: #2a2a4a; color: #a0b0ff; padding: 6px; border: 1px solid #3a3a6a; }
+            QScrollBar:vertical { background: #1e1e32; width: 12px; margin: 0; }
+            QScrollBar::handle:vertical { background: #3a3a6a; border-radius: 6px; min-height: 20px; }
+            QScrollBar::handle:vertical:hover { background: #4a4ad2; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar:horizontal { background: #1e1e32; height: 12px; }
+            QScrollBar::handle:horizontal { background: #3a3a6a; border-radius: 6px; min-width: 20px; }
+            QScrollBar::handle:horizontal:hover { background: #4a4ad2; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+            QTextEdit { background: #0d0d1a; color: #00ff00; font-family: Consolas, monospace; border: 1px solid #3a3a6a; border-radius: 5px; padding: 8px; }
+            QTextEdit:focus { border-color: #4a4ad2; }
+            QMessageBox { background-color: #1a1a2e; }
+            QMessageBox QLabel { color: #e0e0e0; }
+            QMessageBox QPushButton { min-width: 80px; }
         """)
         
         window = MainWindow()
@@ -1369,7 +1484,15 @@ def main():
         sys.exit(app.exec_())
         
     except ImportError as e:
-        print(f"PyQt5 не установлен: {e}")
+        print(f"⚠ PyQt5 не установлен: {e}")
+        print("Установите PyQt5: pip install PyQt5")
+        if bc:
+            bc.stop_monitoring()
+        sys.exit(1)
+    except Exception as e:
+        print(f"⚠ Критическая ошибка: {e}")
+        import traceback
+        traceback.print_exc()
         if bc:
             bc.stop_monitoring()
         sys.exit(1)
