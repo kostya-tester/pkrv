@@ -178,52 +178,61 @@ class BenchConnector:
         
         # Ping с таймаутом
         try:
-            ping_result = subprocess.run(
-                f"ping -n 1 -w 2 {info.ip}",
-                shell=True, 
-                capture_output=True, 
-                text=True, 
-                timeout=5
-            )
-            if ping_result.returncode == 0:
-                results.append("[1] Ping: OK")
+            if sys.platform == "win32":
+                ping_result = subprocess.run(
+                    f"ping -n 1 -w 2000 {info.ip}",
+                    shell=True, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=3
+                )
             else:
-                results.append("[1] Ping: FAIL")
+                ping_result = subprocess.run(
+                    f"ping -c 1 -W 2 {info.ip}",
+                    shell=True, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=3
+                )
+            
+            if ping_result.returncode == 0:
+                results.append("  Ping: OK")
+            else:
+                results.append("  Ping: FAIL (хост не отвечает)")
         except subprocess.TimeoutExpired:
-            results.append("[1] Ping: TIMEOUT")
+            results.append("  Ping: TIMEOUT")
         except Exception as e:
-            results.append(f"[1] Ping: ERROR - {str(e)}")
+            results.append(f"  Ping: ERROR - {str(e)}")
         
         # Проверка SSH порта
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3)
+            sock.settimeout(2)
             port_result = sock.connect_ex((info.ip, 22))
             sock.close()
             if port_result == 0:
-                results.append("[2] Port 22: OPEN")
+                results.append("  Port 22: OPEN")
             else:
-                results.append("[2] Port 22: CLOSED")
+                results.append(f"  Port 22: CLOSED (код: {port_result})")
         except Exception as e:
-            results.append(f"[2] Port 22: ERROR - {str(e)}")
+            results.append(f"  Port 22: ERROR - {str(e)}")
         
         results.append("")
         results.append("--- SSH подключение ---")
         
         # 2. Проверка SSH с разными опциями
-        for opts_name, opts in [("NORMAL", self.NORMAL_SSH_OPTS), ("OLD", self.OLD_SSH_OPTS)]:
-            cmd = f'ssh {opts} {info.username}@{info.ip} "echo SSH_OK" 2>&1'
-            try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
-                if "SSH_OK" in r.stdout:
-                    results.append(f"[3] SSH ({opts_name}): OK")
-                else:
-                    error_msg = r.stderr[:80] if r.stderr else r.stdout[:80]
-                    results.append(f"[3] SSH ({opts_name}): FAIL - {error_msg}")
-            except subprocess.TimeoutExpired:
-                results.append(f"[3] SSH ({opts_name}): TIMEOUT (10 sec)")
-            except Exception as e:
-                results.append(f"[3] SSH ({opts_name}): ERROR - {str(e)}")
+        cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "exit 0" 2>&1'
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=8)
+            if r.returncode == 0:
+                results.append("  SSH (OLD): OK")
+            else:
+                error_msg = r.stderr[:100] if r.stderr else r.stdout[:100]
+                results.append(f"  SSH (OLD): FAIL - {error_msg}")
+        except subprocess.TimeoutExpired:
+            results.append("  SSH (OLD): TIMEOUT")
+        except Exception as e:
+            results.append(f"  SSH (OLD): ERROR - {str(e)}")
         
         results.append("")
         results.append("--- Авторизация ---")
@@ -232,17 +241,17 @@ class BenchConnector:
         if name in self.STANDS:
             cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'whoami\' 2>&1"'
             try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
                 if "root" in r.stdout:
-                    results.append("[4] su: OK (получен root)")
+                    results.append("  su: OK (получен root)")
                 else:
-                    out_part = r.stdout[:80] if r.stdout else ""
-                    err_part = r.stderr[:80] if r.stderr else ""
-                    results.append(f"[4] su: FAIL - {out_part} {err_part}")
+                    out_part = r.stdout[:100] if r.stdout else ""
+                    err_part = r.stderr[:100] if r.stderr else ""
+                    results.append(f"  su: FAIL - {out_part} {err_part}")
             except subprocess.TimeoutExpired:
-                results.append("[4] su: TIMEOUT (15 sec)")
+                results.append("  su: TIMEOUT")
             except Exception as e:
-                results.append(f"[4] su: ERROR - {str(e)}")
+                results.append(f"  su: ERROR - {str(e)}")
         
         results.append("")
         results.append("--- Проверка qconn ---")
@@ -251,36 +260,32 @@ class BenchConnector:
         if name in self.STANDS:
             cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'which qconn\' 2>&1"'
             try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
                 if r.stdout.strip():
-                    results.append(f"[5] qconn: FOUND ({r.stdout.strip()[:50]})")
+                    results.append(f"  qconn: FOUND ({r.stdout.strip()[:50]})")
                 else:
-                    results.append("[5] qconn: NOT FOUND")
+                    results.append("  qconn: NOT FOUND")
             except subprocess.TimeoutExpired:
-                results.append("[5] qconn: TIMEOUT (15 sec)")
+                results.append("  qconn: TIMEOUT")
             except Exception as e:
-                results.append(f"[5] qconn: ERROR - {str(e)}")
+                results.append(f"  qconn: ERROR - {str(e)}")
         
         results.append("")
         results.append("--- Проверка целевой папки ---")
         
         # 5. Проверка доступа к папке CVS
         if name in self.STANDS:
-            cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'ls -la /home/pkrv/CVS/ | head -5\' 2>&1"'
+            cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'test -d /home/pkrv/CVS && echo OK || echo FAIL\' 2>&1"'
             try:
-                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
-                if "total" in r.stdout or "drwx" in r.stdout:
-                    results.append("[6] CVS папка: ACCESS OK")
-                    # Показываем первые 2 строки
-                    lines = [l for l in r.stdout.split('\n') if l.strip()][:2]
-                    for line in lines:
-                        results.append(f"    {line[:60]}")
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+                if "OK" in r.stdout:
+                    results.append("  CVS папка: OK")
                 else:
-                    results.append(f"[6] CVS папка: NO ACCESS - {r.stderr[:80]}")
+                    results.append(f"  CVS папка: FAIL - {r.stderr[:80]}")
             except subprocess.TimeoutExpired:
-                results.append("[6] CVS папка: TIMEOUT (15 sec)")
+                results.append("  CVS папка: TIMEOUT")
             except Exception as e:
-                results.append(f"[6] CVS папка: ERROR - {str(e)}")
+                results.append(f"  CVS папка: ERROR - {str(e)}")
         
         results.append("")
         results.append("=== ДИАГНОСТИКА ЗАВЕРШЕНА ===")
@@ -449,6 +454,28 @@ def main():
             def run(self):
                 ok, msg = bc.connect(self.name)
                 self.finished.emit(self.name, ok, msg)
+        
+        class DiagnosticThread(QThread):
+            """Поток для выполнения диагностики"""
+            result_ready = pyqtSignal(str)
+            status_update = pyqtSignal(str)
+            finished = pyqtSignal()
+            
+            def __init__(self, name):
+                super().__init__()
+                self.name = name
+            
+            def run(self):
+                try:
+                    self.status_update.emit("Проверка сети...")
+                    result = bc.diagnose_connection(self.name)
+                    self.result_ready.emit(result)
+                    self.status_update.emit("Диагностика завершена")
+                except Exception as e:
+                    self.result_ready.emit(f"Ошибка при диагностике:\n{str(e)}")
+                    self.status_update.emit(f"Ошибка: {str(e)[:50]}")
+                finally:
+                    self.finished.emit()
         
         class MainWindow(QMainWindow):
             def __init__(self):
@@ -718,39 +745,44 @@ def main():
                 self.diag_status.setStyleSheet("color: #888; font-size: 11px;")
                 diag_layout.addWidget(self.diag_status)
                 
-                def run_diagnostic():
-                    # Блокируем кнопки во время диагностики
-                    self.diag_stand.setEnabled(False)
-                    diag_btn.setEnabled(False)
-                    self.diag_text.clear()
-                    self.diag_status.setText("Выполняется диагностика... подождите")
-                    self.diag_status.setStyleSheet("color: #ff9800; font-size: 11px;")
-                    
-                    name = self.diag_stand.currentText()
-                    
-                    def do_diagnose():
-                        try:
-                            result = bc.diagnose_connection(name)
-                            self.diag_text.setText(result)
-                            self.diag_status.setText("Диагностика завершена")
-                            self.diag_status.setStyleSheet("color: #4caf50; font-size: 11px;")
-                        except Exception as e:
-                            self.diag_text.setText(f"Ошибка при диагностике:\n{str(e)}")
-                            self.diag_status.setText(f"Ошибка: {str(e)[:50]}")
-                            self.diag_status.setStyleSheet("color: #f44336; font-size: 11px;")
-                        finally:
-                            # Разблокируем кнопки
-                            self.diag_stand.setEnabled(True)
-                            diag_btn.setEnabled(True)
-                    
-                    # Запускаем в отдельном потоке
-                    threading.Thread(target=do_diagnose, daemon=True).start()
-                
-                diag_btn = QPushButton("ЗАПУСТИТЬ ДИАГНОСТИКУ")
-                diag_btn.clicked.connect(run_diagnostic)
-                diag_layout.addWidget(diag_btn)
+                self.diag_btn = QPushButton("ЗАПУСТИТЬ ДИАГНОСТИКУ")
+                self.diag_btn.clicked.connect(self.run_diagnostic)
+                diag_layout.addWidget(self.diag_btn)
                 
                 self.tabs.addTab(diag_tab, "ДИАГНОСТИКА")
+            
+            def run_diagnostic(self):
+                """Запуск диагностики в отдельном потоке"""
+                # Блокируем кнопки
+                self.diag_stand.setEnabled(False)
+                self.diag_btn.setEnabled(False)
+                self.diag_text.clear()
+                self.diag_status.setText("Выполняется диагностика...")
+                self.diag_status.setStyleSheet("color: #ff9800; font-size: 11px;")
+                
+                name = self.diag_stand.currentText()
+                
+                # Создаем и запускаем поток диагностики
+                self.diag_thread = DiagnosticThread(name)
+                self.diag_thread.result_ready.connect(self.on_diagnostic_result)
+                self.diag_thread.status_update.connect(self.on_diagnostic_status)
+                self.diag_thread.finished.connect(self.on_diagnostic_finished)
+                self.diag_thread.start()
+            
+            def on_diagnostic_result(self, result):
+                """Получение результата диагностики"""
+                self.diag_text.setText(result)
+            
+            def on_diagnostic_status(self, status):
+                """Обновление статуса диагностики"""
+                self.diag_status.setText(status)
+            
+            def on_diagnostic_finished(self):
+                """Окончание диагностики"""
+                self.diag_stand.setEnabled(True)
+                self.diag_btn.setEnabled(True)
+                if "Ошибка" not in self.diag_status.text() and "завершена" not in self.diag_status.text():
+                    self.diag_status.setStyleSheet("color: #4caf50; font-size: 11px;")
             
             def setup_timer(self):
                 self.timer = QTimer()
