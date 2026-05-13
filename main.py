@@ -204,7 +204,7 @@ class BenchConnector:
             except:
                 pass
         
-        # Если ничего нет - используем обычный ssh (пароль будет запрошен в терминале)
+        # Если ничего нет - используем обычный ssh
         cmd = f'ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -247,7 +247,6 @@ class BenchConnector:
             except:
                 pass
         
-        # Обычный scp
         cmd = f'scp {opts} {port_opt} "{local_path}" {info.username}@{info.ip}:"{remote_path}"'
         try:
             r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
@@ -282,59 +281,16 @@ class BenchConnector:
                         return False, f"Неверный логин/пароль для {name}@{info.ip}"
                     return False, f"Не удалось подключиться к {name} ({info.ip})\n{stderr[:200]}"
                 
-                # 2. Выполняем su и показываем содержимое папок
-                connect_cmd = (
-                    f'echo "{password}" | sudo -S -u root bash -c "'
-                    f'  echo SU_OK;'
-                    f'  echo --- /home/pkrv/CVS ---;'
-                    f'  ls -la /home/pkrv/CVS 2>&1;'
-                    f'  echo --- /tmp ---;'
-                    f'  ls -la /tmp 2>&1;'
-                    f'  echo --- /fead_hd ---;'
-                    f'  ls -la /fead_hd 2>&1;'
-                    f'  echo --- /fs/ssd0 ---;'
-                    f'  ls -la /fs/ssd0 2>&1;'
-                    f'" 2>/dev/null'
-                )
+                # 2. Выполняем sudo для получения прав
+                connect_cmd = f'echo "{password}" | sudo -S echo SU_OK'
                 code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=False, timeout=20, password=password)
                 
-                # 3. Если sudo не сработал - пробуем expect
-                if "SU_OK" not in stdout and SSH_TOOLS.get("expect"):
-                    connect_cmd = (
-                        f'which expect >/dev/null 2>&1 && '
-                        f'expect -c \'set timeout 10; '
-                        f'spawn su -c "'
-                        f'echo SU_OK;'
-                        f'echo --- /home/pkrv/CVS ---;'
-                        f'ls -la /home/pkrv/CVS 2>&1;'
-                        f'echo --- /tmp ---;'
-                        f'ls -la /tmp 2>&1;'
-                        f'echo --- /fead_hd ---;'
-                        f'ls -la /fead_hd 2>&1;'
-                        f'echo --- /fs/ssd0 ---;'
-                        f'ls -la /fs/ssd0 2>&1;'
-                        f'"; '
-                        f'expect "Password:"; send "{password}\\r"; expect eof\' '
-                        f'|| echo "EXPECT_NOT_FOUND"'
-                    )
-                    code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=True, timeout=20, password=password)
-                
-                # 4. Формируем ответ
                 if "SU_OK" in stdout:
                     info.connected = True
-                    result = f"Подключен к {name}\n\n"
-                    
-                    # Извлекаем содержимое папок
-                    parts = stdout.split("---")
-                    for part in parts:
-                        part = part.strip()
-                        if part and part not in ["SU_OK", "SUCCESS"]:
-                            result += part + "\n\n"
-                    
-                    return True, result.strip()
+                    return True, f"Подключен к {name}\n(права sudo получены)"
                 else:
                     return False, (
-                        f"Не удалось выполнить su на {name}\n"
+                        f"Не удалось выполнить sudo на {name}\n"
                         f"stdout: {stdout[-300:]}\n"
                         f"stderr: {stderr[-300:]}"
                     )
@@ -349,6 +305,26 @@ class BenchConnector:
         except Exception as e:
             return False, f"Критическая ошибка: {str(e)}"
     
+    def auto_connect_all_stands(self):
+        """Функция для автоматического подключения всех стендов"""
+        results = {}
+        for name in self.stands:
+            print(f"Попытка подключения: {name}")
+            try:
+                success, message = self.connect(name)
+                if success:
+                    print(f"Статус {name}: Успешно")
+                    results[name] = True
+                else:
+                    print(f"Статус {name}: Ошибка - {message}")
+                    results[name] = False
+                    results['Error'] = message
+            except Exception as e:
+                print(f"Статус {name}: Ошибка исключения - {str(e)}")
+                results[name] = False
+                results['Error'] = str(e)
+        return results
+    
     def disconnect(self, name):
         if name in self.stands:
             self.stands[name].connected = False
@@ -356,7 +332,6 @@ class BenchConnector:
     def execute(self, name, command, timeout=30):
         """
         Выполнение команды на стенде.
-        Для старых стендов выполняет команду через sudo.
         """
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
@@ -365,11 +340,9 @@ class BenchConnector:
         pwd = info.password
         
         if name in self.STANDS:
-            # Для старых стендов выполняем через sudo
             full_cmd = f'echo "{pwd}" | sudo -S bash -c "{command}"'
             code, stdout, stderr = self._ssh_command(name, full_cmd, use_tty=False, timeout=timeout, password=pwd)
         else:
-            # Для современных систем напрямую
             code, stdout, stderr = self._ssh_command(name, command, timeout=timeout, password=pwd)
         
         return code == 0, stdout, stderr
@@ -502,26 +475,6 @@ class BenchConnector:
         else:
             results.append(f"  SSH: FAIL\n  stdout: {stdout[:100]}\n  stderr: {stderr[:100]}")
         
-        # sudo тест (для старых стендов)
-        if name in self.STANDS and code == 0:
-            results.append("")
-            results.append("--- sudo ---")
-            sudo_cmd = f'echo "{info.password}" | sudo -S echo SU_OK'
-            code, stdout, stderr = self._ssh_command(name, sudo_cmd, use_tty=False, timeout=10, password=info.password)
-            if "SU_OK" in stdout:
-                results.append("  sudo: OK (есть права root)")
-            else:
-                results.append(f"  sudo: FAIL\n  stdout: {stdout[:100]}\n  stderr: {stderr[:100]}")
-        
-        results.append("")
-        results.append("--- РЕКОМЕНДАЦИИ ---")
-        
-        if not SSH_TOOLS.get('sshpass') and not SSH_TOOLS.get('expect'):
-            results.append("  Для автоматической авторизации установите sshpass:")
-            results.append("    Windows: choco install sshpass")
-            results.append("    Linux: sudo apt install sshpass")
-            results.append("    Mac: brew install sshpass")
-        
         results.append("")
         results.append("=== ДИАГНОСТИКА ЗАВЕРШЕНА ===")
         
@@ -544,10 +497,11 @@ def main():
     global bc, stand_cards
     
     parser = argparse.ArgumentParser(description="Bench Manager")
-    parser.add_argument('--console', '-c', action='store_true')
-    parser.add_argument('--check', action='store_true')
-    parser.add_argument('--version', '-v', action='store_true')
-    parser.add_argument('--info', action='store_true')
+    parser.add_argument('--console', '-c', action='store_true', help='Консольный режим с автоподключением')
+    parser.add_argument('--check', action='store_true', help='Проверить статус стендов')
+    parser.add_argument('--version', '-v', action='store_true', help='Версия')
+    parser.add_argument('--info', action='store_true', help='Информация об SSH инструментах')
+    parser.add_argument('--stand', '-s', type=str, help='Подключиться к конкретному стенду (имя)')
     args = parser.parse_args()
     
     if args.version:
@@ -568,24 +522,41 @@ def main():
     
     bc = BenchConnector()
     bc.start_monitoring()
+    time.sleep(2)
     
-    if args.check or args.console:
-        time.sleep(3)
-        print("=== Доступные стенды ===")
-        for name, info in bc.get_all_info().items():
-            s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
-            print(f"  {name:12} | {info['ip']:16}:{info['port']} | {s}")
-        
-        if args.console:
-            print("\n=== Подключение к стендам ===")
-            for n in ["ГОЗ", "Арктика", "C1M"]:
-                print(f"\n{n}:")
-                ok, msg = bc.connect(n)
-                print(f"  {'OK' if ok else 'FAIL'} - {msg[:200]}")
-        
+    # Консольный режим с автоподключением всех стендов
+    if args.console:
+        print("\n=== АВТОМАТИЧЕСКОЕ ПОДКЛЮЧЕНИЕ КО ВСЕМ СТЕНДАМ ===\n")
+        results = bc.auto_connect_all_stands()
+        print("\n=== ИТОГОВЫЕ РЕЗУЛЬТАТЫ ===")
+        for name, success in results.items():
+            if name != 'Error':
+                print(f"  {name}: {'✓ УСПЕШНО' if success else '✗ ОШИБКА'}")
+        if 'Error' in results:
+            print(f"\nПоследняя ошибка: {results['Error']}")
         bc.stop_monitoring()
         return
     
+    # Подключение к конкретному стенду
+    if args.stand:
+        print(f"\n=== ПОДКЛЮЧЕНИЕ К СТЕНДУ {args.stand} ===\n")
+        ok, msg = bc.connect(args.stand)
+        print(f"Результат: {'✓ УСПЕШНО' if ok else '✗ ОШИБКА'}")
+        print(f"Сообщение: {msg}")
+        bc.stop_monitoring()
+        return
+    
+    # Проверка статуса стендов
+    if args.check:
+        time.sleep(3)
+        print("\n=== ДОСТУПНЫЕ СТЕНДЫ ===\n")
+        for name, info in bc.get_all_info().items():
+            s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
+            print(f"  {name:12} | {info['ip']:16}:{info['port']} | {s}")
+        bc.stop_monitoring()
+        return
+    
+    # GUI режим
     try:
         from PyQt5.QtWidgets import (
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
@@ -743,19 +714,16 @@ def main():
                 layout.setSpacing(10)
                 layout.setContentsMargins(15, 15, 15, 15)
                 
-                # Заголовок
                 header = QLabel("BENCH MANAGER")
                 header.setStyleSheet("font-size: 28px; font-weight: bold; color: #a0b0ff; padding: 15px;")
                 header.setAlignment(Qt.AlignCenter)
                 layout.addWidget(header)
                 
-                # Статус
                 self.status_label = QLabel("ЗАГРУЗКА...")
                 self.status_label.setStyleSheet("color: #888; font-size: 12px;")
                 self.status_label.setAlignment(Qt.AlignCenter)
                 layout.addWidget(self.status_label)
                 
-                # Вкладки
                 self.tabs = QTabWidget()
                 layout.addWidget(self.tabs)
                 
