@@ -13,7 +13,6 @@ import socket
 import threading
 import subprocess
 import argparse
-import shutil
 from datetime import datetime
 
 # ============================================================
@@ -33,34 +32,33 @@ IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
 # ПРОВЕРКА SSH-ИНСТРУМЕНТОВ
 # ============================================================
 
+SSH_TOOLS = {
+    "sshpass": False,
+    "expect": False,
+    "ssh": False
+}
+
 def check_ssh_tools():
     """Проверяем доступность sshpass и других утилит"""
-    tools = {}
-    
-    # Проверяем sshpass
     try:
         subprocess.run(["sshpass", "-V"], capture_output=True, timeout=2)
-        tools["sshpass"] = True
+        SSH_TOOLS["sshpass"] = True
     except:
-        tools["sshpass"] = False
-    
-    # Проверяем expect
+        SSH_TOOLS["sshpass"] = False
+
     try:
         subprocess.run(["expect", "-v"], capture_output=True, timeout=2)
-        tools["expect"] = True
+        SSH_TOOLS["expect"] = True
     except:
-        tools["expect"] = False
-    
-    # Проверяем обычный ssh
+        SSH_TOOLS["expect"] = False
+
     try:
         subprocess.run(["ssh", "-V"], capture_output=True, timeout=2)
-        tools["ssh"] = True
+        SSH_TOOLS["ssh"] = True
     except:
-        tools["ssh"] = False
-    
-    return tools
+        SSH_TOOLS["ssh"] = False
 
-SSH_TOOLS = check_ssh_tools()
+check_ssh_tools()
 
 # ============================================================
 # КЛАСС ДЛЯ АВТОМАТИЗАЦИИ SSH
@@ -68,18 +66,6 @@ SSH_TOOLS = check_ssh_tools()
 
 class SSHAutomator:
     """Класс для работы с SSH, поддерживающий разные методы авторизации"""
-    
-    def __init__(self):
-        self.password_files = {}
-    
-    def _cleanup(self):
-        """Удаляет временные файлы паролей"""
-        for path in self.password_files.values():
-            try:
-                os.unlink(path)
-            except:
-                pass
-        self.password_files.clear()
     
     def _get_ssh_options(self, name):
         """Возвращает опции SSH для конкретного стенда"""
@@ -133,9 +119,6 @@ class BenchConnector:
         self.ssh_automator = SSHAutomator()
         self._init_stands()
     
-    def __del__(self):
-        self.ssh_automator._cleanup()
-    
     def _init_stands(self):
         for name, cfg in self.STANDS.items():
             self.stands[name] = StandInfo(name, cfg['ip'], cfg['username'], cfg.get('password', ''), cfg.get('type', ''))
@@ -175,43 +158,14 @@ class BenchConnector:
         """Возвращает опции SSH"""
         return self.ssh_automator._get_ssh_options(name)
     
-    def _run_interactive_ssh(self, name, remote_cmd, use_tty=False):
-        """
-        Запускает SSH в интерактивном режиме (запрашивает пароль в терминале)
-        Используется когда нет sshpass и expect
-        """
-        info = self.stands[name]
-        opts = self._get_ssh_opts(name)
-        tty_opt = "-tt" if use_tty else ""
-        
-        # Запускаем ssh в отдельном окне терминала или напрямую
-        cmd = f'ssh {opts} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
-        
-        # На Windows используем start, на Linux/Mac просто запускаем
-        if sys.platform == "win32":
-            # Открываем новое окно cmd для ввода пароля
-            full_cmd = f'start cmd /k "{cmd} & pause"'
-            subprocess.Popen(full_cmd, shell=True)
-            # Ждем ввода пользователя
-            input(f"\n=== ВНИМАНИЕ ===\nВыполняется команда: {cmd}\nПожалуйста, введите пароль в открывшемся окне.\nНажмите Enter после завершения...")
-            return 0, "OK (интерактивный режим)", ""
-        else:
-            # На Linux/Mac запускаем в текущем терминале
-            os.system(cmd)
-            return 0, "OK (интерактивный режим)", ""
-    
     def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=30, password=None):
         """
-        Выполнение SSH команды с автоматической или ручной авторизацией.
+        Выполнение SSH команды с автоматической авторизацией.
         """
         info = self.stands[name]
         pwd = password or info.password
         opts = self._get_ssh_opts(name)
-        
-        if use_tty:
-            tty_opt = "-tt"
-        else:
-            tty_opt = ""
+        tty_opt = "-tt" if use_tty else ""
         
         # Пробуем sshpass
         if SSH_TOOLS.get("sshpass") and pwd:
@@ -241,9 +195,15 @@ class BenchConnector:
             except:
                 pass
         
-        # Если ничего не помогло - интерактивный режим
-        print(f"\n[INFO] Нет автоматических инструментов авторизации. Будет использован ручной ввод пароля для {name}")
-        return self._run_interactive_ssh(name, remote_cmd, use_tty)
+        # Если ничего нет - используем обычный ssh (пароль будет запрошен в терминале)
+        cmd = f'ssh {opts} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+            return r.returncode, r.stdout, r.stderr
+        except subprocess.TimeoutExpired:
+            return -1, "", "Timeout"
+        except Exception as e:
+            return -1, "", str(e)
     
     def _scp_copy(self, name, local_path, remote_path):
         """Копирование файла через SCP с авторизацией"""
@@ -277,20 +237,17 @@ class BenchConnector:
             except:
                 pass
         
-        # Интерактивный режим для SCP
-        print(f"\n[INFO] Копирование файла {local_path} на {name}")
+        # Обычный scp
         cmd = f'scp {opts} "{local_path}" {info.username}@{info.ip}:"{remote_path}"'
-        if sys.platform == "win32":
-            subprocess.Popen(f'start cmd /k "{cmd} & pause"', shell=True)
-            input(f"Выполняется SCP. Нажмите Enter после завершения...")
-            return True, "OK"
-        else:
-            os.system(cmd)
-            return True, "OK"
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+            return r.returncode == 0, r.stderr if r.stderr else r.stdout
+        except Exception as e:
+            return False, str(e)
 
     def connect(self, name, password=None):
         """
-        Подключение к стенду с полной авторизацией.
+        Подключение к стенду.
         """
         try:
             if name not in self.stands:
@@ -300,28 +257,15 @@ class BenchConnector:
             if password is None:
                 password = info.password
             
-            # Для старых стендов (ГОЗ, Арктика, C1M)
-            if name in self.STANDS:
-                # Проверяем SSH доступ
-                test_cmd = "echo SSH_OK"
-                code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10, password=password)
-                
-                if code != 0:
-                    return False, f"Не удалось подключиться к {name}\nПроверьте пароль в открывшемся окне"
-                
-                # Проверяем sudo/su
-                connect_cmd = 'echo "SUCCESS"'
-                code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=False, timeout=10, password=password)
-                
+            # Проверяем SSH доступ
+            test_cmd = "echo SSH_OK"
+            code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10, password=password)
+            
+            if code == 0 and "SSH_OK" in stdout:
                 info.connected = True
                 return True, f"Подключен к {name}"
             else:
-                # Для OrangePi
-                code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10, password=password)
-                if code == 0:
-                    info.connected = True
-                    return True, f"Подключен к {name}"
-                return False, f"Ошибка подключения к {name}"
+                return False, f"Не удалось подключиться к {name}\n{stderr[:200]}"
                 
         except Exception as e:
             return False, f"Критическая ошибка: {str(e)}"
@@ -340,11 +284,7 @@ class BenchConnector:
         info = self.stands[name]
         pwd = info.password
         
-        if name in self.STANDS:
-            # Для старых стендов
-            code, stdout, stderr = self._ssh_command(name, command, use_tty=True, timeout=timeout, password=pwd)
-        else:
-            code, stdout, stderr = self._ssh_command(name, command, timeout=timeout, password=pwd)
+        code, stdout, stderr = self._ssh_command(name, command, use_tty=False, timeout=timeout, password=pwd)
         
         return code == 0, stdout, stderr
     
@@ -361,7 +301,6 @@ class BenchConnector:
         if not self.stands[name].connected:
             return False, "Нет подключения к стенду"
         
-        info = self.stands[name]
         if local_dir is None:
             local_dir = os.getcwd()
         
@@ -371,28 +310,16 @@ class BenchConnector:
         results.append("")
         
         # 1. Проверка локальных файлов
-        results.append("[1/5] Проверяю локальные файлы...")
+        results.append("[1/4] Проверяю локальные файлы...")
         mpo_path = os.path.join(local_dir, "mpo")
-        kc_path = os.path.join(local_dir, "KC_mpo.txt")
-        cfg_path = os.path.join(local_dir, "1po2_1n.cfg")
         
         if not os.path.exists(mpo_path):
             return False, "Файл mpo не найден в текущей папке"
         results.append("  + Файл mpo найден")
-        
-        if os.path.exists(kc_path):
-            results.append("  + Файл KC_mpo.txt найден")
-        else:
-            results.append("  ! Файл KC_mpo.txt не найден")
-        
-        if os.path.exists(cfg_path):
-            results.append("  + Файл 1po2_1n.cfg найден")
-        else:
-            results.append("  ! Файл 1po2_1n.cfg не найден")
         results.append("")
         
         # 2. Копирование файлов
-        results.append("[2/5] Копирование файлов на сервер...")
+        results.append("[2/4] Копирование файлов на сервер...")
         
         ok, err = self._scp_copy(name, mpo_path, "/home/pkrv/CVS/mpo")
         if ok:
@@ -400,26 +327,27 @@ class BenchConnector:
         else:
             results.append(f"  ОШИБКА: {err}")
             return False, "\n".join(results)
-        
-        if os.path.exists(kc_path):
-            ok, err = self._scp_copy(name, kc_path, "/home/pkrv/CVS/KC_mpo.txt")
-            if ok:
-                results.append("  + KC_mpo.txt скопирован")
-        
-        if os.path.exists(cfg_path):
-            ok, err = self._scp_copy(name, cfg_path, "/fpo_cfg/1po2_1n.cfg")
-            if ok:
-                results.append("  + 1po2_1n.cfg скопирован")
         results.append("")
         
-        # 3. Настройка
-        results.append("[3/5] Настройка прав...")
+        # 3. Настройка прав
+        results.append("[3/4] Настройка прав...")
         setup_cmd = "chmod +x /home/pkrv/CVS/mpo && sync"
         code, stdout, stderr = self.execute(name, setup_cmd, timeout=10)
         results.append("  + Права установлены")
         results.append("")
         
+        # 4. Проверка
+        results.append("[4/4] Проверка...")
+        check_cmd = "ls -la /home/pkrv/CVS/mpo"
+        code, stdout, stderr = self.execute(name, check_cmd, timeout=10)
+        if code:
+            results.append("  + Файл на месте")
+        else:
+            results.append("  ! Ошибка проверки")
+        
+        results.append("")
         results.append("=== ДЕПЛОЙ ЗАВЕРШЕН ===")
+        
         return True, "\n".join(results)
     
     def diagnose_connection(self, name):
@@ -432,9 +360,9 @@ class BenchConnector:
         results.append(f"sshpass: {'есть' if SSH_TOOLS.get('sshpass') else 'нет'}")
         results.append(f"expect: {'есть' if SSH_TOOLS.get('expect') else 'нет'}")
         results.append("")
-        results.append("--- Сеть ---")
         
         # Ping
+        results.append("--- Сеть ---")
         try:
             ping_param = "-n 1 -w 2000" if sys.platform == "win32" else "-c 1 -W 2"
             ping = subprocess.run(f"ping {ping_param} {info.ip}", shell=True, capture_output=True, text=True, timeout=3)
@@ -452,6 +380,15 @@ class BenchConnector:
         except:
             results.append("  Port 22: ERROR")
         
+        # SSH тест
+        results.append("")
+        results.append("--- SSH тест ---")
+        code, stdout, stderr = self._ssh_command(name, "echo SSH_OK", timeout=10)
+        if code == 0 and "SSH_OK" in stdout:
+            results.append("  SSH: OK")
+        else:
+            results.append(f"  SSH: FAIL\n  stderr: {stderr[:100]}")
+        
         results.append("")
         results.append("--- РЕКОМЕНДАЦИИ ---")
         
@@ -460,9 +397,6 @@ class BenchConnector:
             results.append("    Windows: choco install sshpass")
             results.append("    Linux: sudo apt install sshpass")
             results.append("    Mac: brew install sshpass")
-            results.append("")
-            results.append("  Без sshpass программа будет открывать")
-            results.append("  отдельные окна для ввода пароля.")
         
         results.append("")
         results.append("=== ДИАГНОСТИКА ЗАВЕРШЕНА ===")
@@ -503,6 +437,9 @@ def main():
         print(f"  ssh: {'есть' if SSH_TOOLS.get('ssh') else 'нет'}")
         if not SSH_TOOLS.get('sshpass') and not SSH_TOOLS.get('expect'):
             print("\nРекомендуется установить sshpass для автоматического ввода пароля")
+            print("  Windows: choco install sshpass")
+            print("  Linux: sudo apt install sshpass")
+            print("  Mac: brew install sshpass")
         return
     
     bc = BenchConnector()
@@ -949,8 +886,7 @@ def main():
         if not SSH_TOOLS.get('sshpass') and not SSH_TOOLS.get('expect'):
             QMessageBox.information(None, "Внимание", 
                 "Не установлены sshpass или expect.\n\n"
-                "При подключении к стендам будут открываться "
-                "отдельные окна для ввода пароля.\n\n"
+                "При подключении к стендам пароль нужно будет вводить вручную.\n\n"
                 "Для автоматической авторизации установите sshpass:\n"
                 "  Windows: choco install sshpass\n"
                 "  Linux: sudo apt install sshpass\n"
