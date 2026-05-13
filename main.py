@@ -293,22 +293,14 @@ class BenchConnector:
                         return False, f"Неверный логин/пароль для {name}@{info.ip}"
                     return False, f"Не удалось подключиться к {name} ({info.ip})\n{stderr[:200]}"
                 
-                # 2. Выполняем su и qconn
-                connect_cmd = f'echo "{password}" | su -c "qconn; echo SU_OK"'
+                # 2. Выполняем su
+                connect_cmd = f'echo "{password}" | su -c "echo SU_OK"'
                 code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=True, timeout=20, password=password)
                 
-                if "SU_OK" in stdout or "Password:" not in stdout:
+                if "SU_OK" in stdout:
                     info.connected = True
-                    return True, f"Подключен к {name}\n(su + qconn выполнены)"
+                    return True, f"Подключен к {name}\n(su выполнен)"
                 else:
-                    # Пробуем другой вариант
-                    connect_cmd = f"echo {password} | su -c 'qconn 2>&1; echo SUCCESS'"
-                    code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=True, timeout=20, password=password)
-                    
-                    if "SUCCESS" in stdout:
-                        info.connected = True
-                        return True, f"Подключен к {name} (альтернативный метод)"
-                    
                     return False, f"Не удалось выполнить su на {name}\nstdout: {stdout[-200:]}\nstderr: {stderr[-200:]}"
             else:
                 # Для OrangePi и других современных систем
@@ -338,7 +330,9 @@ class BenchConnector:
         
         if name in self.STANDS:
             # Для старых стендов выполняем через su
-            full_cmd = f'echo "{pwd}" | su -c "{command}"'
+            # Экранируем кавычки в команде
+            command_escaped = command.replace('"', '\\"')
+            full_cmd = f'echo "{pwd}" | su -c "{command_escaped}"'
             code, stdout, stderr = self._ssh_command(name, full_cmd, use_tty=True, timeout=timeout)
         else:
             # Для современных систем напрямую
@@ -581,6 +575,33 @@ class BenchConnector:
             else:
                 results.append(f"  su: FAIL\n  stdout: {stdout[:100]}\n  stderr: {stderr[:100]}")
         
+        # 5. Проверка доступа к папкам
+        if name in self.STANDS:
+            results.append("")
+            results.append("--- Доступ к папкам ---")
+            
+            # Проверка CVS
+            cvs_cmd = 'ls -la /home/pkrv/CVS/ 2>&1 | head -5'
+            code, stdout, stderr = self.execute(name, cvs_cmd, timeout=10)
+            if code and stdout:
+                results.append("  /home/pkrv/CVS/:")
+                for line in stdout.split('\n')[:3]:
+                    if line.strip():
+                        results.append(f"    {line[:60]}")
+            else:
+                results.append(f"  /home/pkrv/CVS/: НЕТ ДОСТУПА - {stderr[:100]}")
+            
+            # Проверка fpo_cfg
+            cfg_cmd = 'ls -la /fpo_cfg/ 2>&1 | head -5'
+            code, stdout, stderr = self.execute(name, cfg_cmd, timeout=10)
+            if code and stdout:
+                results.append("  /fpo_cfg/:")
+                for line in stdout.split('\n')[:3]:
+                    if line.strip():
+                        results.append(f"    {line[:60]}")
+            else:
+                results.append(f"  /fpo_cfg/: НЕТ ДОСТУПА - {stderr[:100]}")
+        
         results.append("")
         results.append("=== ДИАГНОСТИКА ЗАВЕРШЕНА ===")
         
@@ -649,7 +670,7 @@ def main():
             QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
             QWidget, QPushButton, QTabWidget, QTextEdit, QComboBox,
             QLineEdit, QMessageBox, QFrame, QTreeWidget, QTreeWidgetItem,
-            QGroupBox, QRadioButton, QButtonGroup
+            QGroupBox
         )
         from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
         from PyQt5.QtGui import QPixmap, QIcon, QColor, QFont
@@ -965,7 +986,7 @@ def main():
                 # Log
                 self.files_log = QTextEdit()
                 self.files_log.setReadOnly(True)
-                self.files_log.setMaximumHeight(50)
+                self.files_log.setMaximumHeight(80)
                 files_layout.addWidget(self.files_log)
                 
                 # Buttons
@@ -1004,7 +1025,7 @@ def main():
                 
                 self.op_log = QTextEdit()
                 self.op_log.setReadOnly(True)
-                self.op_log.setMaximumHeight(50)
+                self.op_log.setMaximumHeight(80)
                 op_layout.addWidget(self.op_log)
                 
                 op_btn = QHBoxLayout()
@@ -1202,6 +1223,8 @@ def main():
                 if ok:
                     QMessageBox.information(self, "Успех", msg)
                     self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Подключен к {name}")
+                    # После успешного подключения обновляем список файлов
+                    QTimer.singleShot(500, lambda: self.browse_stand_files() if name == self.files_stand.currentText() else None)
                 else:
                     QMessageBox.critical(self, "Ошибка подключения", msg)
                     self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка подключения к {name}: {msg[:100]}")
@@ -1212,6 +1235,8 @@ def main():
                 """Отключение от стенда"""
                 bc.disconnect(name)
                 self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Отключен от {name}")
+                self.files_tree.clear()
+                self.files_log.setText("Стенд отключен")
                 self.update_all_cards()
             
             def run_diagnostic(self):
@@ -1295,15 +1320,35 @@ def main():
                 name = self.files_stand.currentText()
                 path = self.files_path.text().strip() or "/"
                 
-                if name not in bc.stands or not bc.stands[name].connected:
-                    self.files_log.setText(f"⚠ Стенд {name} не подключен")
+                # Проверяем подключение
+                if name not in bc.stands:
+                    self.files_log.setText(f"Ошибка: Стенд {name} не найден")
+                    return
+                
+                if not bc.stands[name].connected:
+                    self.files_log.setText(f"Стенд {name} не подключен! Нажмите ПОДКЛЮЧИТЬ")
+                    self.files_tree.clear()
                     return
                 
                 self.files_tree.clear()
-                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                self.files_log.setText(f"Загрузка {path}...")
+                QApplication.processEvents()
+                
+                # Для отладки - проверим кто мы
+                ok, whoami, err = bc.execute(name, "whoami", timeout=5)
+                if ok:
+                    self.files_log.append(f"Пользователь: {whoami.strip()}")
+                else:
+                    self.files_log.append(f"Ошибка определения пользователя: {err[:50]}")
+                
+                # Выполняем ls
+                ok, out, err = bc.execute(name, f'ls -la --time-style=long-iso "{path}" 2>&1', timeout=15)
                 
                 if ok:
-                    for line in out.split('\n'):
+                    lines = out.split('\n')
+                    item_count = 0
+                    
+                    for line in lines:
                         if line.startswith('total') or not line.strip():
                             continue
                         parts = line.split()
@@ -1327,24 +1372,33 @@ def main():
                                 item.setForeground(0, QColor("#90ee90"))
                             
                             self.files_tree.addTopLevelItem(item)
+                            item_count += 1
                     
-                    self.files_log.setText(f"✓ {path}")
+                    self.files_log.setText(f"✓ {path} - найдено {item_count} элементов")
                 else:
-                    self.files_log.setText(f"✗ Ошибка: {err[:100]}")
+                    error_msg = err if err else out[:200]
+                    self.files_log.setText(f"✗ Ошибка: {error_msg}")
+                    # Если не удалось прочитать, пробуем просто проверить существование папки
+                    ok, out, err = bc.execute(name, f'test -d "{path}" && echo "EXISTS" || echo "NOT_EXISTS"', timeout=5)
+                    if ok:
+                        self.files_log.append(f"Папка существует: {out.strip()}")
             
             def cd_stand_folder(self):
                 """Переход в выбранную папку"""
                 item = self.files_tree.currentItem()
                 if item and item.text(2) == "Папка":
                     current_path = self.files_path.text().rstrip('/')
-                    self.files_path.setText(f"{current_path}/{item.text(0)}")
+                    new_path = f"{current_path}/{item.text(0)}"
+                    self.files_path.setText(new_path)
                     self.browse_stand_files()
             
             def up_stand(self):
                 """Переход на уровень вверх"""
                 cur = self.files_path.text().rstrip('/')
-                if cur != '/':
-                    parent = os.path.dirname(cur) or '/'
+                if cur and cur != '/':
+                    parent = os.path.dirname(cur)
+                    if not parent:
+                        parent = '/'
                     self.files_path.setText(parent)
                     self.browse_stand_files()
             
@@ -1353,12 +1407,20 @@ def main():
                 name = self.op_stand.currentText()
                 path = self.op_path.text().strip() or "/"
                 
-                if name not in bc.stands or not bc.stands[name].connected:
-                    self.op_log.setText(f"⚠ Стенд {name} не подключен")
+                if name not in bc.stands:
+                    self.op_log.setText(f"Ошибка: Стенд {name} не найден")
+                    return
+                
+                if not bc.stands[name].connected:
+                    self.op_log.setText(f"Стенд {name} не подключен! Нажмите ПОДКЛЮЧИТЬ")
+                    self.op_tree.clear()
                     return
                 
                 self.op_tree.clear()
-                ok, out, err = bc.execute(name, f"ls -la --time-style=long-iso {path} 2>/dev/null")
+                self.op_log.setText(f"Загрузка {path}...")
+                QApplication.processEvents()
+                
+                ok, out, err = bc.execute(name, f'ls -la --time-style=long-iso "{path}" 2>&1', timeout=15)
                 
                 if ok:
                     for line in out.split('\n'):
@@ -1392,14 +1454,17 @@ def main():
                 item = self.op_tree.currentItem()
                 if item and item.text(2) == "Папка":
                     current_path = self.op_path.text().rstrip('/')
-                    self.op_path.setText(f"{current_path}/{item.text(0)}")
+                    new_path = f"{current_path}/{item.text(0)}"
+                    self.op_path.setText(new_path)
                     self.browse_op()
             
             def up_op(self):
                 """Переход на уровень вверх на OrangePi"""
                 cur = self.op_path.text().rstrip('/')
-                if cur != '/':
-                    parent = os.path.dirname(cur) or '/'
+                if cur and cur != '/':
+                    parent = os.path.dirname(cur)
+                    if not parent:
+                        parent = '/'
                     self.op_path.setText(parent)
                     self.browse_op()
             
