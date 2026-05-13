@@ -52,7 +52,8 @@ class BenchConnector:
     OLD_SSH_OPTS = (
         "-o HostKeyAlgorithms=+ssh-rsa "
         "-o PubkeyAcceptedKeyTypes=+ssh-rsa "
-        "-o MACs=+hmac-md5 "
+        "-o MACs=+hmac-md5,hmac-sha1 "
+        "-o KexAlgorithms=+diffie-hellman-group1-sha1 "
         "-o StrictHostKeyChecking=no "
         "-o LogLevel=ERROR "
         "-o UserKnownHostsFile=NUL "
@@ -100,7 +101,7 @@ class BenchConnector:
     def stop_monitoring(self): 
         self.monitoring = False
 
-    def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=15):
+    def _ssh_command(self, name, remote_cmd, use_tty=False, timeout=30):
         info = self.stands[name]
         opts = self.OLD_SSH_OPTS if name in self.STANDS else self.NORMAL_SSH_OPTS
         if use_tty:
@@ -127,7 +128,7 @@ class BenchConnector:
                 return False, f"Нет пароля для стенда {name}"
             
             if name in self.STANDS:
-                remote_cmd = f"echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
+                remote_cmd = f"export LANG=C && export LC_ALL=C && echo '{password}' | su -c 'qconn && ls /home/pkrv/CVS > /dev/null 2>&1 && echo OK || echo FAIL'"
                 code, stdout, stderr = self._ssh_command(name, remote_cmd, use_tty=True, timeout=20)
                 
                 if 'OK' in stdout:
@@ -156,7 +157,7 @@ class BenchConnector:
             return False, "", "Нет подключения"
         info = self.stands[name]
         pwd = info.password
-        full_cmd = f"echo '{pwd}' | su -c 'qconn && {command}'" if name in self.STANDS else command
+        full_cmd = f"export LANG=C && export LC_ALL=C && echo '{pwd}' | su -c 'qconn && {command}'" if name in self.STANDS else command
         code, stdout, stderr = self._ssh_command(name, full_cmd, use_tty=True, timeout=timeout)
         return code == 0, stdout, stderr
     
@@ -164,6 +165,63 @@ class BenchConnector:
         return {name: {"name": s.name, "ip": s.ip, "username": s.username,
                        "status": s.status, "connected": s.connected,
                        "type": s.stand_type} for name, s in self.stands.items()}
+    
+    def diagnose_connection(self, name):
+        """Диагностика проблем подключения"""
+        results = []
+        
+        # 1. Проверка сети
+        info = self.stands[name]
+        results.append(f"=== Диагностика {name} ({info.ip}) ===")
+        
+        # Ping
+        ping_result = subprocess.run(f"ping -n 1 {info.ip}", shell=True, capture_output=True, text=True)
+        results.append(f"Ping: {'OK' if ping_result.returncode == 0 else 'FAIL'}")
+        
+        # Проверка SSH порта
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        port_result = sock.connect_ex((info.ip, 22))
+        sock.close()
+        results.append(f"Port 22: {'OPEN' if port_result == 0 else 'CLOSED'}")
+        
+        # 2. Проверка SSH с разными опциями
+        for opts_name, opts in [("NORMAL", self.NORMAL_SSH_OPTS), ("OLD", self.OLD_SSH_OPTS)]:
+            cmd = f'ssh {opts} {info.username}@{info.ip} "echo SSH_OK" 2>&1'
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+                if "SSH_OK" in r.stdout:
+                    results.append(f"SSH ({opts_name}): OK")
+                else:
+                    results.append(f"SSH ({opts_name}): FAIL - {r.stderr[:100]}")
+            except Exception as e:
+                results.append(f"SSH ({opts_name}): ERROR - {str(e)}")
+        
+        # 3. Проверка su с паролем
+        if name in self.STANDS:
+            cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'whoami\' 2>&1"'
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+                if "root" in r.stdout:
+                    results.append("su: OK (получен root)")
+                else:
+                    results.append(f"su: FAIL - {r.stdout[:100]} {r.stderr[:100]}")
+            except Exception as e:
+                results.append(f"su: ERROR - {str(e)}")
+        
+        # 4. Проверка qconn
+        if name in self.STANDS:
+            cmd = f'ssh {self.OLD_SSH_OPTS} {info.username}@{info.ip} "echo \'{info.password}\' | su -c \'which qconn\' 2>&1"'
+            try:
+                r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+                if r.stdout.strip():
+                    results.append(f"qconn: найдено по пути {r.stdout.strip()}")
+                else:
+                    results.append("qconn: НЕ НАЙДЕН!")
+            except Exception as e:
+                results.append(f"qconn: ERROR - {str(e)}")
+        
+        return "\n".join(results)
 
 # ============================================================
 # ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ДЛЯ GUI
@@ -212,7 +270,7 @@ def main():
             QLineEdit, QMessageBox, QFrame, QTreeWidget, QTreeWidgetItem
         )
         from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
-        from PyQt5.QtGui import QPixmap, QIcon, QColor
+        from PyQt5.QtGui import QPixmap, QIcon, QColor, QFont
         
         STAND_IMAGES = {
             "ГОЗ": "goz.png", "Арктика": "arktika.png",
@@ -385,6 +443,7 @@ def main():
                 self.create_op_files_tab()
                 self.create_processes_tab()
                 self.create_logs_tab()
+                self.create_diagnostics_tab()  # Добавлена вкладка диагностики
             
             def create_stands_tab(self):
                 stands_tab = QWidget()
@@ -576,6 +635,41 @@ def main():
                 log_layout.addWidget(QPushButton("ОЧИСТИТЬ", clicked=lambda: self.log_text.clear()))
                 
                 self.tabs.addTab(log_tab, "ЛОГИ")
+            
+            def create_diagnostics_tab(self):
+                """Вкладка диагностики"""
+                diag_tab = QWidget()
+                diag_layout = QVBoxLayout(diag_tab)
+                
+                diag_stand = QComboBox()
+                diag_stand.addItems(["ГОЗ", "Арктика", "C1M", "OrangePi"])
+                diag_layout.addWidget(diag_stand)
+                
+                diag_text = QTextEdit()
+                diag_text.setReadOnly(True)
+                diag_text.setFont(QFont("Consolas", 10))
+                diag_layout.addWidget(diag_text)
+                
+                def run_diagnostic():
+                    diag_text.clear()
+                    name = diag_stand.currentText()
+                    diag_text.setText("Выполняется диагностика...\n")
+                    QApplication.processEvents()
+                    
+                    # Запускаем диагностику в отдельном потоке
+                    def do_diagnose():
+                        result = bc.diagnose_connection(name)
+                        # Возвращаем результат в главный поток
+                        from PyQt5.QtCore import QMetaObject, Qt
+                        QMetaObject.invokeMethod(diag_text, "setText", Qt.QueuedConnection, result)
+                    
+                    threading.Thread(target=do_diagnose, daemon=True).start()
+                
+                diag_btn = QPushButton("ЗАПУСТИТЬ ДИАГНОСТИКУ")
+                diag_btn.clicked.connect(run_diagnostic)
+                diag_layout.addWidget(diag_btn)
+                
+                self.tabs.addTab(diag_tab, "ДИАГНОСТИКА")
             
             def setup_timer(self):
                 self.timer = QTimer()
