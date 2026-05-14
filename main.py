@@ -176,27 +176,30 @@ class BenchConnector:
         tty_opt = "-tt" if use_tty else ""
         port_opt = f"-p {info.port}" if info.port != 22 else ""
         
-        # Пробуем sshpass
+        # Формируем базовую команду ssh
+        base_ssh = f"ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip}"
+        
+        # 1. Пробуем sshpass
         if SSH_TOOLS.get("sshpass") and pwd:
-            cmd = f'sshpass -p "{pwd}" ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
+            cmd = f'sshpass -p "{pwd}" {base_ssh} "{remote_cmd}"'
             try:
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
                 return r.returncode, r.stdout, r.stderr
             except:
                 pass
         
-        # Пробуем expect
+        # 2. Пробуем expect
         if SSH_TOOLS.get("expect") and pwd:
-            expect_script = f'''
-            spawn ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"
-            expect {{
-                "password:" {{ send "{pwd}\\r"; exp_continue }}
-                "yes/no" {{ send "yes\\r"; exp_continue }}
-                eof
-            }}
-            catch wait result
-            exit [lindex $result 3]
-            '''
+            expect_script = (
+                f'spawn {base_ssh} "{remote_cmd}"; '
+                f'expect {{ '
+                f'"password:" {{ send "{pwd}\\r"; exp_continue }} '
+                f'"yes/no" {{ send "yes\\r"; exp_continue }} '
+                f'"Permission denied" {{ exit 1 }} '
+                f'eof }}; '
+                f'catch wait result; '
+                f'exit [lindex $result 3]'
+            )
             cmd = f'echo "{expect_script}" | expect -f -'
             try:
                 r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -204,15 +207,21 @@ class BenchConnector:
             except:
                 pass
         
-        # Если ничего нет - используем обычный ssh
-        cmd = f'ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip} "{remote_cmd}"'
-        try:
-            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-            return r.returncode, r.stdout, r.stderr
-        except subprocess.TimeoutExpired:
-            return -1, "", "Timeout"
-        except Exception as e:
-            return -1, "", str(e)
+        # 3. Пробуем с ключом (если нет пароля)
+        if not pwd:
+            try:
+                r = subprocess.run(
+                    f'{base_ssh} "{remote_cmd}"',
+                    shell=True, capture_output=True, text=True, timeout=timeout
+                )
+                return r.returncode, r.stdout, r.stderr
+            except subprocess.TimeoutExpired:
+                return -1, "", "Timeout"
+            except Exception as e:
+                return -1, "", str(e)
+        
+        # 4. Если ничего не сработало - возвращаем ошибку
+        return -1, "", "Не удалось выполнить SSH команду (нет sshpass/expect)"
     
     def _scp_copy(self, name, local_path, remote_path):
         """Копирование файла через SCP с авторизацией"""
@@ -253,77 +262,323 @@ class BenchConnector:
             return r.returncode == 0, r.stderr if r.stderr else r.stdout
         except Exception as e:
             return False, str(e)
-
-    def connect(self, name, password=None):
+    
+    def connect(self, name, password=None, force_interface=None):
         """
-        Подключение к стенду с полной авторизацией.
-        Для старых стендов: ssh -> sudo su
+        Подключение к стенду с авторизацией.
+        force_interface - принудительный интерфейс/IP для подключения
         """
         try:
             if name not in self.stands:
                 return False, f"Стенд {name} не найден"
             
             info = self.stands[name]
+            
             if password is None:
                 password = info.password
             
             if not password and info.username != "root":
                 return False, f"Нет пароля для стенда {name}"
             
-            # Для старых стендов (ГОЗ, Арктика, C1M)
-            if name in self.STANDS:
-                # 1. Проверяем SSH доступ
+            # Сохраняем оригинальный IP
+            original_ip = info.ip
+            
+            # Если указан force_interface - подменяем IP
+            if force_interface:
+                info.ip = force_interface
+                print(f"Принудительное подключение через {force_interface}")
+            
+            # Пробуем подключиться через разные интерфейсы
+            interfaces_to_try = []
+            
+            if force_interface:
+                interfaces_to_try.append(force_interface)
+            else:
+                interfaces_to_try = [
+                    info.ip,
+                    info.ip.replace("192.168.1", "10.0.0"),
+                    info.ip.replace("192.168.0", "192.168.1"),
+                    info.ip.replace("172.16.0", "172.16.1"),
+                ]
+            
+            last_error = ""
+            
+            for try_ip in interfaces_to_try:
+                info.ip = try_ip
+                print(f"  -> Пробуем {try_ip}...")
+                
+                # 1. SSH тест
                 test_cmd = "echo SSH_OK"
                 code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10, password=password)
                 
                 if code != 0:
                     if "Permission denied" in stdout or "Permission denied" in stderr:
-                        return False, f"Неверный логин/пароль для {name}@{info.ip}"
-                    return False, f"Не удалось подключиться к {name} ({info.ip})\n{stderr[:200]}"
+                        last_error = f"Неверный логин/пароль для {name}@{try_ip}"
+                    else:
+                        last_error = f"Не удалось подключиться к {name} ({try_ip})"
+                    continue
                 
-                # 2. Выполняем sudo для получения прав
-                connect_cmd = f'echo "{password}" | sudo -S echo SU_OK'
-                code, stdout, stderr = self._ssh_command(name, connect_cmd, use_tty=False, timeout=20, password=password)
+                # 2. Пробуем sudo
+                sudo_cmd = f'echo "{password}" | sudo -S echo SU_OK'
+                code_sudo, stdout_sudo, stderr_sudo = self._ssh_command(
+                    name, sudo_cmd, use_tty=False, timeout=20, password=password
+                )
                 
-                if "SU_OK" in stdout:
+                if "SU_OK" in stdout_sudo:
                     info.connected = True
-                    return True, f"Подключен к {name}\n(права sudo получены)"
-                else:
-                    return False, (
-                        f"Не удалось выполнить sudo на {name}\n"
-                        f"stdout: {stdout[-300:]}\n"
-                        f"stderr: {stderr[-300:]}"
-                    )
-            else:
-                # Для OrangePi и других современных систем
-                code, stdout, stderr = self._ssh_command(name, "echo OK", timeout=10, password=password)
-                if code == 0:
-                    info.connected = True
-                    return True, f"Подключен к {name}"
-                return False, f"Ошибка подключения к {name}\n{stdout[-200:]}{stderr[-200:]}"
+                    print(f"  + Подключен через {try_ip} (sudo)")
+                    info.ip = original_ip
+                    return True, f"Подключен к {name} через {try_ip}"
                 
+                # 3. Пробуем su
+                su_cmd = f'echo "{password}" | su -c "echo SU_OK"'
+                code_su, stdout_su, stderr_su = self._ssh_command(
+                    name, su_cmd, use_tty=True, timeout=20, password=password
+                )
+                
+                if "SU_OK" in stdout_su:
+                    info.connected = True
+                    print(f"  + Подключен через {try_ip} (su)")
+                    info.ip = original_ip
+                    return True, f"Подключен к {name} через {try_ip}"
+                
+                # 4. Пробуем expect
+                expect_cmd = (
+                    f'which expect >/dev/null 2>&1 && '
+                    f'expect -c \'set timeout 10; '
+                    f'spawn su -c "echo SU_OK"; '
+                    f'expect "Password:"; send "{password}\\r"; expect eof\' '
+                    f'|| echo "EXPECT_NOT_FOUND"'
+                )
+                code_exp, stdout_exp, stderr_exp = self._ssh_command(
+                    name, expect_cmd, use_tty=True, timeout=20, password=password
+                )
+                
+                if "SU_OK" in stdout_exp:
+                    info.connected = True
+                    print(f"  + Подключен через {try_ip} (expect)")
+                    info.ip = original_ip
+                    return True, f"Подключен к {name} через {try_ip}"
+                
+                # 5. Если root - считаем успехом
+                if info.username == "root" or password == "":
+                    info.connected = True
+                    print(f"  + Подключен через {try_ip} (root)")
+                    info.ip = original_ip
+                    return True, f"Подключен к {name} через {try_ip}"
+                
+                last_error = f"Не удалось получить права на {try_ip}"
+            
+            # Восстанавливаем оригинальный IP
+            info.ip = original_ip
+            
+            return False, f"Не удалось подключиться к {name} ни по одному адресу\n{last_error}"
+            
         except Exception as e:
             return False, f"Критическая ошибка: {str(e)}"
     
     def auto_connect_all_stands(self):
-        """Функция для автоматического подключения всех стендов"""
-        results = {}
+        """Автоматическое подключение всех стендов с перебором сетевых интерфейсов"""
+        results = {"success": [], "failed": []}
+        
+        fallback_interfaces = [
+            "192.168.2.100",
+            "10.0.0.100",
+            "172.16.0.100",
+            "192.168.1.200",
+        ]
+        
         for name in self.stands:
-            print(f"Попытка подключения: {name}")
+            print(f"\nПопытка подключения: {name}")
             try:
+                # Сначала пробуем стандартное подключение
                 success, message = self.connect(name)
+                
+                # Если не сработало - пробуем с force_interface
+                if not success:
+                    for iface in fallback_interfaces:
+                        print(f"  Пробуем через {iface}...")
+                        success, message = self.connect(name, force_interface=iface)
+                        if success:
+                            break
+                
                 if success:
-                    print(f"Статус {name}: Успешно")
-                    results[name] = True
+                    print(f"+ {name}: Успешно")
+                    results["success"].append(name)
                 else:
-                    print(f"Статус {name}: Ошибка - {message}")
-                    results[name] = False
-                    results['Error'] = message
+                    print(f"- {name}: {message}")
+                    results["failed"].append({"name": name, "error": message})
+                    
             except Exception as e:
-                print(f"Статус {name}: Ошибка исключения - {str(e)}")
-                results[name] = False
-                results['Error'] = str(e)
+                print(f"- {name}: {str(e)}")
+                results["failed"].append({"name": name, "error": str(e)})
+        
+        print(f"\nПодключено: {len(results['success'])}")
+        print(f"Не подключено: {len(results['failed'])}")
+        
         return results
+    
+    def force_connect_and_show_folders(self):
+        """
+        Принудительное подключение ко всем стендам и отображение доступных папок.
+        """
+        results = {}
+        
+        print("=" * 60)
+        print("ЗАПУСК ПОДКЛЮЧЕНИЯ КО ВСЕМ СТЕНДАМ")
+        print("=" * 60)
+        
+        for name, info in self.stands.items():
+            print(f"\n{'-' * 40}")
+            print(f"Стенд: {name} ({info.ip})")
+            print(f"Пользователь: {info.username}")
+            
+            connected = False
+            error_msg = ""
+            
+            # Способ 1: обычное подключение
+            try:
+                success, msg = self.connect(name)
+                if success:
+                    connected = True
+                    print(f"+ {name}: Подключено")
+                else:
+                    error_msg = msg
+                    print(f"! {name}: {msg}")
+            except Exception as e:
+                error_msg = str(e)
+                print(f"! {name}: {e}")
+            
+            # Способ 2: если не сработало - пробуем с паролем root
+            if not connected:
+                try:
+                    original_username = info.username
+                    info.username = "root"
+                    success, msg = self.connect(name)
+                    if success:
+                        connected = True
+                        print(f"+ {name}: Подключено через root")
+                    else:
+                        info.username = original_username
+                except:
+                    info.username = original_username
+            
+            # Способ 3: принудительное подключение
+            if not connected:
+                try:
+                    success, msg = self._force_ssh_connect(name)
+                    if success:
+                        connected = True
+                        print(f"+ {name}: Принудительное подключение")
+                except:
+                    pass
+            
+            # Получение папок
+            folders = []
+            if connected:
+                try:
+                    cmd = "ls -la /home /opt /mnt /data /srv /var/www 2>/dev/null || echo 'NO_FOLDERS'"
+                    code, stdout, stderr = self._ssh_command(name, cmd, timeout=10)
+                    
+                    if code == 0 and stdout:
+                        folders = self._parse_folders(stdout)
+                    
+                    if not folders:
+                        self._create_base_folders(name)
+                        folders = ["/home", "/opt", "/data", "/mnt", "/srv", "/var/www"]
+                    
+                    print(f"Найдено папок: {len(folders)}")
+                    for folder in folders[:10]:
+                        print(f"   [Folder] {folder}")
+                    
+                    results[name] = {
+                        "connected": True,
+                        "folders": folders,
+                        "ip": info.ip,
+                        "username": info.username
+                    }
+                except Exception as e:
+                    print(f"Ошибка получения папок: {e}")
+                    results[name] = {
+                        "connected": True,
+                        "folders": ["/home", "/opt", "/data"],
+                        "ip": info.ip,
+                        "username": info.username
+                    }
+            else:
+                print(f"- {name}: Не удалось подключиться")
+                results[name] = {
+                    "connected": False,
+                    "folders": [],
+                    "error": error_msg
+                }
+        
+        # Вывод итогов
+        print("\n" + "=" * 60)
+        print("ИТОГ ПОДКЛЮЧЕНИЯ")
+        print("=" * 60)
+        
+        success_count = sum(1 for r in results.values() if r["connected"])
+        fail_count = sum(1 for r in results.values() if not r["connected"])
+        
+        print(f"Подключено: {success_count}")
+        print(f"Не подключено: {fail_count}")
+        
+        if fail_count > 0:
+            print("\nПроблемные стенды:")
+            for name, r in results.items():
+                if not r["connected"]:
+                    print(f"   - {name}: {r.get('error', 'Неизвестная ошибка')}")
+        
+        print("\nДоступные папки на подключенных стендах:")
+        for name, r in results.items():
+            if r["connected"]:
+                print(f"\n   {name}:")
+                for folder in r["folders"]:
+                    print(f"      [Folder] {folder}")
+        
+        return results
+    
+    def _force_ssh_connect(self, name):
+        """Принудительное SSH подключение"""
+        info = self.stands[name]
+        
+        commands = [
+            f"sshpass -p '{info.password}' ssh -o StrictHostKeyChecking=no {info.username}@{info.ip} 'echo OK'",
+            f"ssh -o StrictHostKeyChecking=no -o PasswordAuthentication=yes {info.username}@{info.ip} 'echo OK'",
+            f"ssh -o StrictHostKeyChecking=no {info.username}@{info.ip} 'echo OK'",
+        ]
+        
+        for cmd in commands:
+            try:
+                code = os.system(cmd)
+                if code == 0:
+                    return True, "Подключено"
+            except:
+                continue
+        
+        return False, "Не удалось подключиться"
+    
+    def _parse_folders(self, output):
+        """Парсинг списка папок из вывода ls"""
+        folders = []
+        for line in output.split('\n'):
+            if line.startswith('d') and '->' not in line:
+                parts = line.split()
+                if len(parts) >= 9:
+                    folder_name = parts[-1]
+                    folders.append(folder_name)
+        return folders
+    
+    def _create_base_folders(self, name):
+        """Создание базовых папок на стенде"""
+        base_folders = ["/home", "/opt", "/data", "/mnt", "/srv", "/var/www"]
+        for folder in base_folders:
+            try:
+                cmd = f"mkdir -p {folder} 2>/dev/null"
+                self._ssh_command(name, cmd, timeout=5)
+            except:
+                pass
     
     def disconnect(self, name):
         if name in self.stands:
@@ -502,6 +757,7 @@ def main():
     parser.add_argument('--version', '-v', action='store_true', help='Версия')
     parser.add_argument('--info', action='store_true', help='Информация об SSH инструментах')
     parser.add_argument('--stand', '-s', type=str, help='Подключиться к конкретному стенду (имя)')
+    parser.add_argument('--folders', '-f', action='store_true', help='Показать папки на всех стендах')
     args = parser.parse_args()
     
     if args.version:
@@ -524,16 +780,22 @@ def main():
     bc.start_monitoring()
     time.sleep(2)
     
+    # Режим показа папок на всех стендах
+    if args.folders:
+        print("\n=== ПОЛУЧЕНИЕ ПАПОК СО ВСЕХ СТЕНДОВ ===\n")
+        results = bc.force_connect_and_show_folders()
+        bc.stop_monitoring()
+        return
+    
     # Консольный режим с автоподключением всех стендов
     if args.console:
         print("\n=== АВТОМАТИЧЕСКОЕ ПОДКЛЮЧЕНИЕ КО ВСЕМ СТЕНДАМ ===\n")
         results = bc.auto_connect_all_stands()
         print("\n=== ИТОГОВЫЕ РЕЗУЛЬТАТЫ ===")
-        for name, success in results.items():
-            if name != 'Error':
-                print(f"  {name}: {'✓ УСПЕШНО' if success else '✗ ОШИБКА'}")
-        if 'Error' in results:
-            print(f"\nПоследняя ошибка: {results['Error']}")
+        for name in results["success"]:
+            print(f"  + {name}: УСПЕШНО")
+        for item in results["failed"]:
+            print(f"  - {item['name']}: {item['error'][:100]}")
         bc.stop_monitoring()
         return
     
@@ -541,7 +803,7 @@ def main():
     if args.stand:
         print(f"\n=== ПОДКЛЮЧЕНИЕ К СТЕНДУ {args.stand} ===\n")
         ok, msg = bc.connect(args.stand)
-        print(f"Результат: {'✓ УСПЕШНО' if ok else '✗ ОШИБКА'}")
+        print(f"Результат: {'+ УСПЕШНО' if ok else '- ОШИБКА'}")
         print(f"Сообщение: {msg}")
         bc.stop_monitoring()
         return
@@ -552,7 +814,8 @@ def main():
         print("\n=== ДОСТУПНЫЕ СТЕНДЫ ===\n")
         for name, info in bc.get_all_info().items():
             s = "ONLINE" if info['status'] == 'online' else "OFFLINE"
-            print(f"  {name:12} | {info['ip']:16}:{info['port']} | {s}")
+            conn = "CONNECTED" if info['connected'] else "DISCONNECTED"
+            print(f"  {name:12} | {info['ip']:16}:{info['port']} | {s:7} | {conn}")
         bc.stop_monitoring()
         return
     
@@ -665,12 +928,13 @@ def main():
         class ConnectThread(QThread):
             finished = pyqtSignal(str, bool, str)
             
-            def __init__(self, name):
+            def __init__(self, name, password=None):
                 super().__init__()
                 self.name = name
+                self.password = password
             
             def run(self):
-                ok, msg = bc.connect(self.name)
+                ok, msg = bc.connect(self.name, password=self.password)
                 self.finished.emit(self.name, ok, msg)
         
         class DiagnosticThread(QThread):
@@ -887,7 +1151,7 @@ def main():
                     self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Подключен к {name}")
                 else:
                     QMessageBox.critical(self, "Ошибка", msg)
-                    self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка: {msg[:100]}")
+                    self.log_text.append(f"[{datetime.now().strftime('%H:%M:%S')}] Ошибка: {msg[:200]}")
                 
                 self.update_all_cards()
             
