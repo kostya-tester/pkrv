@@ -176,7 +176,6 @@ class BenchConnector:
         tty_opt = "-tt" if use_tty else ""
         port_opt = f"-p {info.port}" if info.port != 22 else ""
         
-        # Формируем базовую команду ssh
         base_ssh = f"ssh {opts} {port_opt} {tty_opt} {info.username}@{info.ip}"
         
         # 1. Пробуем sshpass
@@ -207,21 +206,15 @@ class BenchConnector:
             except:
                 pass
         
-        # 3. Пробуем с ключом (если нет пароля)
-        if not pwd:
-            try:
-                r = subprocess.run(
-                    f'{base_ssh} "{remote_cmd}"',
-                    shell=True, capture_output=True, text=True, timeout=timeout
-                )
-                return r.returncode, r.stdout, r.stderr
-            except subprocess.TimeoutExpired:
-                return -1, "", "Timeout"
-            except Exception as e:
-                return -1, "", str(e)
-        
-        # 4. Если ничего не сработало - возвращаем ошибку
-        return -1, "", "Не удалось выполнить SSH команду (нет sshpass/expect)"
+        # 3. Пробуем обычный ssh
+        cmd = f'{base_ssh} "{remote_cmd}"'
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+            return r.returncode, r.stdout, r.stderr
+        except subprocess.TimeoutExpired:
+            return -1, "", "Timeout"
+        except Exception as e:
+            return -1, "", str(e)
     
     def _scp_copy(self, name, local_path, remote_path):
         """Копирование файла через SCP с авторизацией"""
@@ -262,7 +255,7 @@ class BenchConnector:
             return r.returncode == 0, r.stderr if r.stderr else r.stdout
         except Exception as e:
             return False, str(e)
-    
+
     def connect(self, name, password=None, force_interface=None):
         """
         Подключение к стенду с авторизацией.
@@ -296,9 +289,10 @@ class BenchConnector:
             else:
                 interfaces_to_try = [
                     info.ip,
-                    info.ip.replace("192.168.1", "10.0.0"),
-                    info.ip.replace("192.168.0", "192.168.1"),
-                    info.ip.replace("172.16.0", "172.16.1"),
+                    info.ip.replace(".243.", ".244."),
+                    info.ip.replace(".243.", ".242."),
+                    info.ip.replace("192.168.243", "10.10.243"),
+                    info.ip.replace("192.168.243", "172.16.243"),
                 ]
             
             last_error = ""
@@ -342,25 +336,7 @@ class BenchConnector:
                     info.ip = original_ip
                     return True, f"Подключен к {name} через {try_ip}"
                 
-                # 4. Пробуем expect
-                expect_cmd = (
-                    f'which expect >/dev/null 2>&1 && '
-                    f'expect -c \'set timeout 10; '
-                    f'spawn su -c "echo SU_OK"; '
-                    f'expect "Password:"; send "{password}\\r"; expect eof\' '
-                    f'|| echo "EXPECT_NOT_FOUND"'
-                )
-                code_exp, stdout_exp, stderr_exp = self._ssh_command(
-                    name, expect_cmd, use_tty=True, timeout=20, password=password
-                )
-                
-                if "SU_OK" in stdout_exp:
-                    info.connected = True
-                    print(f"  + Подключен через {try_ip} (expect)")
-                    info.ip = original_ip
-                    return True, f"Подключен к {name} через {try_ip}"
-                
-                # 5. Если root - считаем успехом
+                # 4. Если root - считаем успехом
                 if info.username == "root" or password == "":
                     info.connected = True
                     print(f"  + Подключен через {try_ip} (root)")
@@ -377,36 +353,81 @@ class BenchConnector:
         except Exception as e:
             return False, f"Критическая ошибка: {str(e)}"
     
+    def connect_simple(self, name, password=None):
+        """
+        Упрощенное подключение к стенду (без перебора IP).
+        """
+        try:
+            if name not in self.stands:
+                return False, f"Стенд {name} не найден"
+            
+            info = self.stands[name]
+            
+            if password is None:
+                password = info.password
+            
+            if not password and info.username != "root":
+                return False, f"Нет пароля для стенда {name}"
+            
+            # Проверяем SSH доступ
+            test_cmd = "echo SSH_OK"
+            code, stdout, stderr = self._ssh_command(name, test_cmd, timeout=10, password=password)
+            
+            if code != 0:
+                if "Permission denied" in stdout or "Permission denied" in stderr:
+                    return False, f"Неверный логин/пароль для {name}@{info.ip}"
+                return False, f"Не удалось подключиться к {name} ({info.ip})\n{stderr[:200]}"
+            
+            # Пробуем sudo
+            sudo_cmd = f'echo "{password}" | sudo -S echo SU_OK'
+            code_sudo, stdout_sudo, stderr_sudo = self._ssh_command(
+                name, sudo_cmd, use_tty=False, timeout=20, password=password
+            )
+            
+            if "SU_OK" in stdout_sudo:
+                info.connected = True
+                return True, f"Подключен к {name}"
+            
+            # Пробуем su
+            su_cmd = f'echo "{password}" | su -c "echo SU_OK"'
+            code_su, stdout_su, stderr_su = self._ssh_command(
+                name, su_cmd, use_tty=True, timeout=20, password=password
+            )
+            
+            if "SU_OK" in stdout_su:
+                info.connected = True
+                return True, f"Подключен к {name}"
+            
+            # Если root - считаем успехом
+            if info.username == "root" or password == "":
+                info.connected = True
+                return True, f"Подключен к {name}"
+            
+            return False, f"Не удалось получить root доступ на {name}\nПроверьте пароль или настройки sudo/su"
+            
+        except Exception as e:
+            return False, f"Критическая ошибка: {str(e)}"
+    
     def auto_connect_all_stands(self):
-        """Автоматическое подключение всех стендов с перебором сетевых интерфейсов"""
+        """Автоматическое подключение всех стендов"""
         results = {"success": [], "failed": []}
-        
-        fallback_interfaces = [
-            "192.168.2.100",
-            "10.0.0.100",
-            "172.16.0.100",
-            "192.168.1.200",
-        ]
         
         for name in self.stands:
             print(f"\nПопытка подключения: {name}")
             try:
-                # Сначала пробуем стандартное подключение
-                success, message = self.connect(name)
+                # Сначала пробуем упрощенное подключение
+                success, message = self.connect_simple(name)
                 
-                # Если не сработало - пробуем с force_interface
+                # Если не сработало - пробуем с перебором
                 if not success:
-                    for iface in fallback_interfaces:
-                        print(f"  Пробуем через {iface}...")
-                        success, message = self.connect(name, force_interface=iface)
-                        if success:
-                            break
+                    print(f"  Упрощенное подключение не сработало, пробуем с перебором...")
+                    success, message = self.connect(name)
                 
                 if success:
                     print(f"+ {name}: Успешно")
                     results["success"].append(name)
                 else:
-                    print(f"- {name}: {message}")
+                    print(f"- {name}: {message[:100]}")
                     results["failed"].append({"name": name, "error": message})
                     
             except Exception as e:
@@ -436,34 +457,32 @@ class BenchConnector:
             connected = False
             error_msg = ""
             
-            # Способ 1: обычное подключение
+            # Способ 1: упрощенное подключение
             try:
-                success, msg = self.connect(name)
+                success, msg = self.connect_simple(name)
                 if success:
                     connected = True
                     print(f"+ {name}: Подключено")
                 else:
                     error_msg = msg
-                    print(f"! {name}: {msg}")
+                    print(f"! {name}: {msg[:100]}")
             except Exception as e:
                 error_msg = str(e)
                 print(f"! {name}: {e}")
             
-            # Способ 2: если не сработало - пробуем с паролем root
+            # Способ 2: с перебором IP
             if not connected:
                 try:
-                    original_username = info.username
-                    info.username = "root"
                     success, msg = self.connect(name)
                     if success:
                         connected = True
-                        print(f"+ {name}: Подключено через root")
+                        print(f"+ {name}: Подключено (перебор IP)")
                     else:
-                        info.username = original_username
-                except:
-                    info.username = original_username
+                        error_msg = msg
+                except Exception as e:
+                    error_msg = str(e)
             
-            # Способ 3: принудительное подключение
+            # Способ 3: принудительное
             if not connected:
                 try:
                     success, msg = self._force_ssh_connect(name)
@@ -528,7 +547,7 @@ class BenchConnector:
             print("\nПроблемные стенды:")
             for name, r in results.items():
                 if not r["connected"]:
-                    print(f"   - {name}: {r.get('error', 'Неизвестная ошибка')}")
+                    print(f"   - {name}: {r.get('error', 'Неизвестная ошибка')[:100]}")
         
         print("\nДоступные папки на подключенных стендах:")
         for name, r in results.items():
@@ -758,6 +777,7 @@ def main():
     parser.add_argument('--info', action='store_true', help='Информация об SSH инструментах')
     parser.add_argument('--stand', '-s', type=str, help='Подключиться к конкретному стенду (имя)')
     parser.add_argument('--folders', '-f', action='store_true', help='Показать папки на всех стендах')
+    parser.add_argument('--simple', action='store_true', help='Использовать упрощенное подключение')
     args = parser.parse_args()
     
     if args.version:
@@ -802,8 +822,12 @@ def main():
     # Подключение к конкретному стенду
     if args.stand:
         print(f"\n=== ПОДКЛЮЧЕНИЕ К СТЕНДУ {args.stand} ===\n")
-        ok, msg = bc.connect(args.stand)
-        print(f"Результат: {'+ УСПЕШНО' if ok else '- ОШИБКА'}")
+        if args.simple:
+            ok, msg = bc.connect_simple(args.stand)
+            print(f"Результат (упрощенный): {'+ УСПЕШНО' if ok else '- ОШИБКА'}")
+        else:
+            ok, msg = bc.connect(args.stand)
+            print(f"Результат (с перебором): {'+ УСПЕШНО' if ok else '- ОШИБКА'}")
         print(f"Сообщение: {msg}")
         bc.stop_monitoring()
         return
@@ -928,13 +952,17 @@ def main():
         class ConnectThread(QThread):
             finished = pyqtSignal(str, bool, str)
             
-            def __init__(self, name, password=None):
+            def __init__(self, name, password=None, use_simple=False):
                 super().__init__()
                 self.name = name
                 self.password = password
+                self.use_simple = use_simple
             
             def run(self):
-                ok, msg = bc.connect(self.name, password=self.password)
+                if self.use_simple:
+                    ok, msg = bc.connect_simple(self.name, password=self.password)
+                else:
+                    ok, msg = bc.connect(self.name, password=self.password)
                 self.finished.emit(self.name, ok, msg)
         
         class DiagnosticThread(QThread):
@@ -1139,7 +1167,7 @@ def main():
                 self.connecting_states[name] = True
                 self.update_all_cards()
                 
-                self.connect_thread = ConnectThread(name)
+                self.connect_thread = ConnectThread(name, use_simple=False)
                 self.connect_thread.finished.connect(self.on_connect_finished)
                 self.connect_thread.start()
             
