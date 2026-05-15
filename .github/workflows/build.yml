@@ -1,7 +1,7 @@
 name: Build Bench Manager EXE
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -23,6 +23,9 @@ jobs:
       run: python -c "from PIL import Image; img = Image.open('gui/images/logo.png'); img.save('gui/images/logo.ico', format='ICO', sizes=[(256, 256)]); print('ICO created successfully')"
     - name: Build EXE
       shell: cmd
+      env:
+        SERVER_USERNAME: ${{ secrets.SERVER_USERNAME }}
+        SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
       run: pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "config.yaml;." --icon "gui/images/logo.ico" main.py
     - name: Upload artifact
       uses: actions/upload-artifact@v4
