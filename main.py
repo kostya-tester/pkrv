@@ -7,6 +7,7 @@ Bench Manager v3.0
 - Браузер папок на стенде через SSH (ls), не через SFTP
 - Правильные пути для PyInstaller (sys._MEIPASS)
 - Пароли из .env / config.yaml (не хардкод)
+- Иконки стендов из gui/images (arktika, c1m, goz, orangepi, logo)
 """
 
 import sys
@@ -30,9 +31,46 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     APP_DIR = BASE_DIR
 
-IMAGES_DIR = os.path.join(BASE_DIR, "gui", "images")
+IMAGES_DIR  = os.path.join(BASE_DIR, "gui", "images")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")   # внутри _MEIPASS при сборке
 ENV_PATH    = os.path.join(APP_DIR, ".env")            # рядом с .exe — не упаковывается
+
+# ============================================================
+# ИКОНКИ — сопоставление типа платы → имя файла в gui/images
+# ============================================================
+
+# Ключи — значения поля board.type из config.yaml (нижний регистр).
+# Можно добавлять новые пары без правки логики GUI.
+BOARD_ICON_MAP = {
+    "arktika"  : "arktika.png",
+    "c1m"      : "c1m.png",
+    "goz"      : "goz.png",
+    "orangepi" : "orangepi.png",
+}
+
+# Иконка по умолчанию — logo.png
+DEFAULT_ICON = "logo.png"
+
+
+def _icon_path(filename: str) -> str:
+    """Полный путь к файлу иконки. Возвращает пустую строку если файл не найден."""
+    path = os.path.join(IMAGES_DIR, filename)
+    return path if os.path.exists(path) else ""
+
+
+def _board_icon_path(board_type: str) -> str:
+    """
+    Возвращает путь к иконке по типу платы.
+    Если тип не распознан или файл отсутствует — возвращает путь к logo.png.
+    """
+    key      = (board_type or "").strip().lower()
+    filename = BOARD_ICON_MAP.get(key, DEFAULT_ICON)
+    path     = _icon_path(filename)
+    if not path:
+        # Попробуем fallback на logo.png
+        path = _icon_path(DEFAULT_ICON)
+    return path
+
 
 # ============================================================
 # PARAMIKO
@@ -239,9 +277,6 @@ class BenchConnector:
 
         try:
             ssh = paramiko.SSHClient()
-            # WarningPolicy: предупреждает о неизвестном ключе, но не блокирует.
-            # Это нужно для старых стендов где known_hosts не ведётся.
-            # Для production-среды замените на RejectPolicy + ssh-keyscan.
             known = os.path.expanduser("~/.ssh/known_hosts")
             if os.path.exists(known):
                 try:
@@ -261,7 +296,6 @@ class BenchConnector:
                 look_for_keys = False,
             )
 
-            # Быстрая проверка что сессия живая
             _, stdout, _ = ssh.exec_command("echo OK", timeout=5)
             if stdout.read().decode().strip() != "OK":
                 ssh.close()
@@ -316,54 +350,35 @@ class BenchConnector:
     # ----------------------------------------------------------
 
     def list_directory(self, name, path=None):
-        """
-        Возвращает список файлов/папок в path на стенде.
-        Использует SSH-команду ls, а не SFTP — это работает даже когда
-        SFTP-подсистема ограничена или путь виден только в shell-окружении.
-
-        Возвращает (ok, [{"name", "is_dir", "size", "perms", "path"}], error_msg)
-        """
         if name not in self.stands or not self.stands[name].connected:
             return False, [], "Нет подключения"
 
         info   = self.stands[name]
         target = path or info.cvs_path
 
-        # --time-style=+ убирает дату из вывода, делает парсинг стабильным
         cmd = f"ls -la --time-style=+ '{target}' 2>&1"
         ok, out, _ = self.execute(name, cmd)
         if not ok:
             return False, [], "Команда не выполнена"
 
-        # Если путь не существует или нет прав — ls вернёт ошибку в stdout (из-за 2>&1)
         if "No such file" in out or "Permission denied" in out:
             return False, [], out.strip()
 
         return self._parse_ls(out, target)
 
     def list_directory_as_qconn(self, name, path=None):
-        """
-        Листинг от имени пользователя qconn через su.
-        Используется когда папки видны только qconn, а SSH-сессия открыта от pkrv.
-
-        Требует что pkrv может делать su qconn без пароля.
-        Настройка на стенде: добавить в /etc/sudoers строку
-            pkrv ALL=(qconn) NOPASSWD: ALL
-        """
         if name not in self.stands or not self.stands[name].connected:
             return False, [], "Нет подключения"
 
         info   = self.stands[name]
         target = path or info.cvs_path
 
-        # su -c запускает команду от qconn в неинтерактивном режиме
         cmd = f'su qconn -c \'ls -la --time-style=+ "{target}"\' 2>&1'
         ok, out, _ = self.execute(name, cmd)
         if not ok:
             return False, [], "Команда su qconn не выполнена"
 
         lines = out.strip().splitlines()
-        # Если su попросил пароль — первая строка будет "Password:"
         if lines and lines[0].lower().startswith("password"):
             return False, [], (
                 "su qconn требует пароль. "
@@ -402,11 +417,6 @@ class BenchConnector:
     # ----------------------------------------------------------
 
     def deploy_files(self, name, mode="copy", local_dir=None):
-        """
-        Деплой mpo на стенд через SFTP.
-        mode="copy" — оригинал остаётся локально.
-        mode="move" — локальный файл удаляется после копирования.
-        """
         if name not in self.stands:
             return False, f"Стенд {name} не найден"
         if not self.stands[name].connected:
@@ -471,7 +481,6 @@ class BenchConnector:
             "",
         ]
 
-        # Ping
         lines.append("--- Сеть ---")
         try:
             flag = "-n 1 -w 2000" if sys.platform == "win32" else "-c 1 -W 2"
@@ -481,7 +490,6 @@ class BenchConnector:
         except Exception:
             lines.append(" Ping : TIMEOUT")
 
-        # TCP-порт
         try:
             s = socket.socket()
             s.settimeout(2)
@@ -491,7 +499,6 @@ class BenchConnector:
         except Exception:
             lines.append(f" Port {info.port}: ERROR")
 
-        # Попытка SSH
         lines.append("")
         lines.append("--- SSH ---")
         if not HAS_PARAMIKO:
@@ -546,17 +553,23 @@ def _build_gui(bc: BenchConnector):
         QPushButton, QLabel, QTextEdit, QTreeWidget, QTreeWidgetItem,
         QSplitter, QComboBox, QStatusBar, QMessageBox, QFrame,
     )
-    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
-    from PyQt5.QtGui import QFont
+    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
+    from PyQt5.QtGui import QFont, QIcon, QPixmap
+
+    # ----------------------------------------------------------
+    # Вспомогательная функция — загрузить QIcon по пути.
+    # Возвращает QIcon (пустой если файл не найден — Qt не упадёт).
+    # ----------------------------------------------------------
+    def load_icon(path: str) -> QIcon:
+        if path and os.path.exists(path):
+            return QIcon(path)
+        return QIcon()
 
     # ----------------------------------------------------------
     # Worker — подключение в фоновом потоке
-    # Именно это устраняет "connecting и слетает":
-    # ssh.connect() может занять 5-10 сек, и если он вызывается
-    # в главном потоке — Qt считает что приложение зависло и убивает его.
     # ----------------------------------------------------------
     class ConnectWorker(QThread):
-        finished = pyqtSignal(bool, str)   # ok, message
+        finished = pyqtSignal(bool, str)
         log      = pyqtSignal(str)
 
         def __init__(self, connector, stand_name):
@@ -571,10 +584,9 @@ def _build_gui(bc: BenchConnector):
 
     # ----------------------------------------------------------
     # Worker — листинг папки в фоновом потоке
-    # Тоже в отдельном потоке — ls по SSH может занять секунду.
     # ----------------------------------------------------------
     class ListDirWorker(QThread):
-        finished = pyqtSignal(bool, list, str)   # ok, entries, error
+        finished = pyqtSignal(bool, list, str)
         log      = pyqtSignal(str)
 
         def __init__(self, connector, stand_name, path, as_qconn=False):
@@ -603,10 +615,16 @@ def _build_gui(bc: BenchConnector):
             self.bc            = connector
             self.current_stand = None
             self.current_path  = None
-            self._workers      = []   # держим ссылки, чтобы QThread не собрался GC
+            self._workers      = []
 
             self.setWindowTitle("Bench Manager v3.0")
             self.setMinimumSize(900, 600)
+
+            # Иконка приложения — logo.png
+            app_icon_path = _icon_path(DEFAULT_ICON)
+            if app_icon_path:
+                self.setWindowIcon(QIcon(app_icon_path))
+
             self._build_ui()
             self._start_status_timer()
 
@@ -623,15 +641,45 @@ def _build_gui(bc: BenchConnector):
 
             # Левая панель — список стендов
             left = QWidget()
-            left.setFixedWidth(220)
+            left.setFixedWidth(240)
             lv = QVBoxLayout(left)
-            lv.setContentsMargins(0, 0, 0, 0)
+            lv.setContentsMargins(4, 4, 4, 4)
+            lv.setSpacing(6)
+
+            # Логотип приложения в верхней части боковой панели
+            logo_path = _icon_path(DEFAULT_ICON)
+            if logo_path:
+                logo_label = QLabel()
+                pixmap = QPixmap(logo_path).scaled(
+                    200, 60,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                logo_label.setPixmap(pixmap)
+                logo_label.setAlignment(Qt.AlignCenter)
+                lv.addWidget(logo_label)
+
+                line_top = QFrame()
+                line_top.setFrameShape(QFrame.HLine)
+                lv.addWidget(line_top)
 
             lv.addWidget(QLabel("Стенды:"))
+
+            # ComboBox стендов — с иконкой платы для каждого стенда
             self.stand_combo = QComboBox()
-            for name in self.bc.stands:
-                self.stand_combo.addItem(name)
+            self.stand_combo.setIconSize(QSize(24, 24))
+            for name, info in self.bc.stands.items():
+                icon = load_icon(_board_icon_path(info.stand_type))
+                self.stand_combo.addItem(icon, name)
+            # При смене стенда обновляем иконку стенда в заголовке
+            self.stand_combo.currentIndexChanged.connect(self._on_stand_changed)
             lv.addWidget(self.stand_combo)
+
+            # Иконка текущего стенда (крупная, под комбобоксом)
+            self.stand_icon_label = QLabel()
+            self.stand_icon_label.setAlignment(Qt.AlignCenter)
+            lv.addWidget(self.stand_icon_label)
+            self._update_stand_icon()   # показываем иконку сразу
 
             self.btn_connect = QPushButton("Подключиться")
             self.btn_connect.clicked.connect(self._on_connect)
@@ -672,7 +720,7 @@ def _build_gui(bc: BenchConnector):
             # Правая панель
             right_splitter = QSplitter(Qt.Vertical)
 
-            # Дерево файлов — показывает папки стенда
+            # Дерево файлов
             self.file_tree = QTreeWidget()
             self.file_tree.setHeaderLabels(["Имя", "Тип", "Размер", "Права"])
             self.file_tree.setColumnWidth(0, 280)
@@ -689,9 +737,36 @@ def _build_gui(bc: BenchConnector):
             right_splitter.addWidget(self.log_box)
 
             splitter.addWidget(right_splitter)
-            splitter.setSizes([220, 680])
+            splitter.setSizes([240, 660])
 
             self.setStatusBar(QStatusBar())
+
+        # ---------- Иконки стендов ----------
+
+        def _update_stand_icon(self):
+            """Обновляет крупную иконку платы под комбобоксом."""
+            name = self.stand_combo.currentText()
+            if not name or name not in self.bc.stands:
+                self.stand_icon_label.clear()
+                return
+
+            info      = self.bc.stands[name]
+            icon_path = _board_icon_path(info.stand_type)
+            if icon_path:
+                pixmap = QPixmap(icon_path).scaled(
+                    180, 90,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                self.stand_icon_label.setPixmap(pixmap)
+                # Подпись с типом платы под иконкой
+                board_type = info.stand_type or "unknown"
+                self.stand_icon_label.setToolTip(f"Тип платы: {board_type}")
+            else:
+                self.stand_icon_label.clear()
+
+        def _on_stand_changed(self, _index):
+            self._update_stand_icon()
 
         # ---------- Таймер статуса ----------
 
@@ -740,7 +815,6 @@ def _build_gui(bc: BenchConnector):
                 self.btn_browse_qconn.setEnabled(True)
                 self._log(f"✓ {msg}")
                 self.statusBar().showMessage(msg)
-                # Автоматически открываем CVS-папку после подключения
                 name = self.stand_combo.currentText()
                 self.current_stand = name
                 self.current_path  = self.bc.stands[name].cvs_path
@@ -850,6 +924,12 @@ def _build_gui(bc: BenchConnector):
     # Запуск приложения
     # ----------------------------------------------------------
     app    = QApplication(sys.argv)
+
+    # Иконка в панели задач / Alt-Tab — тоже logo.png
+    app_icon_path = _icon_path(DEFAULT_ICON)
+    if app_icon_path:
+        app.setWindowIcon(QIcon(app_icon_path))
+
     window = MainWindow(bc)
     window.show()
     sys.exit(app.exec_())
