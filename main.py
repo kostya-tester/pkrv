@@ -204,23 +204,28 @@ class BenchConnector:
         """
         TCP + попытка прочитать SSH-баннер.
         При timeout на recv считаем online — порт открыт, SSH просто медленный.
+        Сокет всегда закрывается через finally.
         """
+        s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(2)
             if s.connect_ex((ip, port)) != 0:
-                s.close()
                 return False
             s.settimeout(2)
             try:
                 banner = s.recv(64)
-                ok = banner.startswith(b"SSH")
+                return banner.startswith(b"SSH")
             except socket.timeout:
-                ok = True   # порт открыт, баннер не успел — не блокируем
-            s.close()
-            return ok
+                return True   # порт открыт, баннер не успел — не блокируем
         except Exception:
             return False
+        finally:
+            if s:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
     def start_monitoring(self):
         if self.monitoring:
@@ -231,18 +236,29 @@ class BenchConnector:
             interval = self.config.get("monitoring", {}).get("check_interval", 5)
             while self.monitoring:
                 for name, info in list(self.stands.items()):
+                    # Если уже есть активное SSH-соединение — доверяем ему,
+                    # TCP-пинг не трогает живую сессию (race condition fix).
+                    if info.connected and info.ssh_client:
+                        try:
+                            transport = info.ssh_client.get_transport()
+                            if transport and transport.is_active():
+                                info.status = "online"
+                                continue
+                        except Exception:
+                            pass
+                        # Транспорт умер — помечаем как offline и чистим
+                        try:
+                            info.ssh_client.close()
+                        except Exception:
+                            pass
+                        info.ssh_client = None
+                        info.connected  = False
+                        info.status     = "offline"
+                        continue
+
+                    # Нет активного SSH — проверяем TCP-доступность
                     available = self.check_availability(info.ip, info.port)
-                    if available:
-                        info.status = "online"
-                    else:
-                        info.status = "offline"
-                        if info.connected and info.ssh_client:
-                            try:
-                                info.ssh_client.close()
-                            except Exception:
-                                pass
-                            info.ssh_client = None
-                        info.connected = False
+                    info.status = "online" if available else "offline"
                 time.sleep(interval)
 
         threading.Thread(target=loop, daemon=True).start()
@@ -310,8 +326,8 @@ class BenchConnector:
             return False, "Ошибка авторизации: неверный логин или пароль"
         except SSHException as e:
             return False, f"SSH ошибка: {e}"
-        except socket.timeout:
-            return False, f"Таймаут подключения к {info.ip}:{info.port}"
+        except (socket.timeout, TimeoutError, OSError) as e:
+            return False, f"Таймаут / сетевая ошибка подключения к {info.ip}:{info.port} — {e}"
         except Exception as e:
             return False, f"Ошибка: {e}"
 
@@ -389,17 +405,31 @@ class BenchConnector:
 
     @staticmethod
     def _parse_ls(output: str, base_path: str):
-        """Парсит вывод ls -la в список словарей."""
+        """
+        Парсит вывод ls -la --time-style=+ в список словарей.
+
+        Формат строки с --time-style=+:
+          drwxr-xr-x  2 pkrv pkrv  4096  dirname
+          -rw-r--r--  1 pkrv pkrv  1234  file with spaces.txt
+
+        --time-style=+ убирает дату полностью, поэтому после size (поле [4])
+        идёт сразу имя файла, которое может содержать пробелы.
+        Берём его как join от parts[8:] (нумерация: perms links user group size name).
+        Но ls без даты выдаёт 6 полей до имени: perms links user group size name.
+        Поэтому имя = parts[5:] соединённые пробелом.
+        """
         entries = []
         for line in output.strip().splitlines():
             if not line or line.startswith("total"):
                 continue
             parts = line.split()
-            if len(parts) < 7:
+            # Минимум 6 полей: perms links user group size name
+            if len(parts) < 6:
                 continue
             perms  = parts[0]
             size   = int(parts[4]) if parts[4].isdigit() else 0
-            fname  = parts[-1]
+            # Имя файла — всё начиная с 6-го поля (индекс 5), склеиваем пробелом
+            fname  = " ".join(parts[5:])
             is_dir = perms.startswith("d")
             if fname in (".", ".."):
                 continue
@@ -569,7 +599,7 @@ def _build_gui(bc: BenchConnector):
     # Worker — подключение в фоновом потоке
     # ----------------------------------------------------------
     class ConnectWorker(QThread):
-        finished = pyqtSignal(bool, str)
+        finished = pyqtSignal(bool, str, str)  # ok, message, stand_name
         log      = pyqtSignal(str)
 
         def __init__(self, connector, stand_name):
@@ -580,7 +610,7 @@ def _build_gui(bc: BenchConnector):
         def run(self):
             self.log.emit(f"Подключаемся к {self.stand_name}...")
             ok, msg = self.connector.connect(self.stand_name)
-            self.finished.emit(ok, msg)
+            self.finished.emit(ok, msg, self.stand_name)  # имя стенда фиксируем здесь
 
     # ----------------------------------------------------------
     # Worker — листинг папки в фоновом потоке
@@ -806,7 +836,9 @@ def _build_gui(bc: BenchConnector):
             self._workers.append(worker)
             worker.start()
 
-        def _on_connect_done(self, ok, msg):
+        def _on_connect_done(self, ok, msg, stand_name):
+            # stand_name — имя стенда из worker, не из комбобокса.
+            # Это важно: пользователь мог сменить выбор пока шло подключение.
             self.btn_connect.setText("Подключиться")
             if ok:
                 self.btn_connect.setEnabled(False)
@@ -815,10 +847,9 @@ def _build_gui(bc: BenchConnector):
                 self.btn_browse_qconn.setEnabled(True)
                 self._log(f"✓ {msg}")
                 self.statusBar().showMessage(msg)
-                name = self.stand_combo.currentText()
-                self.current_stand = name
-                self.current_path  = self.bc.stands[name].cvs_path
-                self._load_directory(name, self.current_path)
+                self.current_stand = stand_name
+                self.current_path  = self.bc.stands[stand_name].cvs_path
+                self._load_directory(stand_name, self.current_path)
             else:
                 self.btn_connect.setEnabled(True)
                 self._log(f"✗ {msg}")
