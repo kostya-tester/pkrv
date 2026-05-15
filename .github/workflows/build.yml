@@ -11,21 +11,33 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
     - uses: actions/checkout@v4
+
     - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    - name: Install
+
+    - name: Install dependencies
       shell: cmd
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller PyQt5
-    - name: Build
+        pip install pyinstaller PyQt5 paramiko pyyaml
+
+    - name: Build EXE
       shell: cmd
-      run: |
-        pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "config.yaml;." main.py
-    - name: Upload
+      run: >
+        pyinstaller
+        --onefile
+        --windowed
+        --name "BenchManager"
+        --add-data "gui/images;gui/images"
+        --add-data "config.yaml;."
+        --icon "gui/images/logo.png"
+        main.py
+
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: BenchManager-Windows
