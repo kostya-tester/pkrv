@@ -1,30 +1,32 @@
 name: Build Bench Manager EXE
-
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
-
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
     - uses: actions/checkout@v4
-
     - uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-
     - name: Install dependencies
       shell: cmd
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller PyQt5 paramiko pyyaml
-
+        pip install pyinstaller PyQt5 paramiko pyyaml pillow
+    - name: Convert icon to ICO
+      shell: cmd
+      run: |
+        python -c "
+from PIL import Image
+img = Image.open('gui/images/logo.png')
+img.save('gui/images/logo.ico', format='ICO', sizes=[(256, 256)])
+print('ICO created successfully')
+"
     - name: Build EXE
       shell: cmd
       run: >
@@ -34,9 +36,8 @@ jobs:
         --name "BenchManager"
         --add-data "gui/images;gui/images"
         --add-data "config.yaml;."
-        --icon "gui/images/logo.png"
+        --icon "gui/images/logo.ico"
         main.py
-
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
