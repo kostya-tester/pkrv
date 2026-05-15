@@ -20,17 +20,10 @@ jobs:
         pip install pyinstaller PyQt5 paramiko pyyaml pillow
     - name: Convert icon to ICO
       shell: cmd
-      run: |
-        python -c "
-        from PIL import Image
-        img = Image.open('gui/images/logo.png')
-        img.save('gui/images/logo.ico', format='ICO', sizes=[(256, 256)])
-        print('ICO created successfully')
-        "
+      run: python -c "from PIL import Image; img = Image.open('gui/images/logo.png'); img.save('gui/images/logo.ico', format='ICO', sizes=[(256, 256)]); print('ICO created successfully')"
     - name: Build EXE
       shell: cmd
-      run: |
-        pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "config.yaml;." --icon "gui/images/logo.ico" main.py
+      run: pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "config.yaml;." --icon "gui/images/logo.ico" main.py
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
