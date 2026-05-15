@@ -26,6 +26,8 @@ jobs:
       env:
         SERVER_USERNAME: ${{ secrets.SERVER_USERNAME }}
         SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+        ROOT_USERNAME: ${{ secrets.ROOT_USERNAME }}
+        ORANGEPI_PASSWORD: ${{ secrets.ORANGEPI_PASSWORD }}
       run: pyinstaller --onefile --windowed --name "BenchManager" --add-data "gui/images;gui/images" --add-data "config.yaml;." --icon "gui/images/logo.ico" main.py
     - name: Upload artifact
       uses: actions/upload-artifact@v4
