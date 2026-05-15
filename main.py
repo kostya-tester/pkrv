@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Bench Manager v3.0
-- Подключение через Paramiko в отдельном QThread (GUI не зависает)
-- Браузер папок на стенде через SSH (ls), не через SFTP
-- Правильные пути для PyInstaller (sys._MEIPASS)
-- Пароли из .env / config.yaml (не хардкод)
-- Иконки стендов из gui/images (arktika, c1m, goz, orangepi, logo)
+Bench Manager v4.0
+- Dark industrial GUI (PyQt5)
+- Автоматически получает права su -> qconn при подключении
+- Папки: /home/pkrv/CVS, /tmp, /fead_hd, /fs/ (для ГОЗ, С1М, Арктика)
+- Папка: cd / (для Orange Pi) + просмотр содержимого файлов
+- Браузер папок через SSH (ls), не через SFTP
+- Иконки стендов: goz.png, arktika.png, c1m.png, orangepi.png, logo.png
+- Пароли из .env / config.yaml
 """
 
 import sys
@@ -20,56 +22,58 @@ import subprocess
 from datetime import datetime
 
 # ============================================================
-# ПУТИ — работают и в .py и в собранном .exe (PyInstaller)
+# ПУТИ
 # ============================================================
 if getattr(sys, "frozen", False):
-    # Запуск из .exe — все встроенные ресурсы (config, images) лежат в sys._MEIPASS
     BASE_DIR = sys._MEIPASS
-    # APP_DIR — папка рядом с .exe, туда кладём .env и пишем логи
-    APP_DIR = os.path.dirname(sys.executable)
+    APP_DIR  = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    APP_DIR = BASE_DIR
+    APP_DIR  = BASE_DIR
 
 IMAGES_DIR  = os.path.join(BASE_DIR, "gui", "images")
-CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")   # внутри _MEIPASS при сборке
-ENV_PATH    = os.path.join(APP_DIR, ".env")            # рядом с .exe — не упаковывается
+CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
+ENV_PATH    = os.path.join(APP_DIR,  ".env")
 
 # ============================================================
-# ИКОНКИ — сопоставление типа платы → имя файла в gui/images
+# ИКОНКИ
 # ============================================================
-
-# Ключи — значения поля board.type из config.yaml (нижний регистр).
-# Можно добавлять новые пары без правки логики GUI.
 BOARD_ICON_MAP = {
-    "arktika"  : "arktika.png",
-    "c1m"      : "c1m.png",
-    "goz"      : "goz.png",
-    "orangepi" : "orangepi.png",
+    "arktika" : "arktika.png",
+    "c1m"     : "c1m.png",
+    "goz"     : "goz.png",
+    "orangepi": "orangepi.png",
 }
-
-# Иконка по умолчанию — logo.png
 DEFAULT_ICON = "logo.png"
+
+# Папки по типу платы
+BOARD_FOLDERS = {
+    "goz"     : ["/home/pkrv/CVS", "/tmp", "/fead_hd", "/fs/"],
+    "c1m"     : ["/home/pkrv/CVS", "/tmp", "/fead_hd", "/fs/"],
+    "arktika" : ["/home/pkrv/CVS", "/tmp", "/fead_hd", "/fs/"],
+    "orangepi": ["/"],
+}
+DEFAULT_FOLDERS = ["/home/pkrv/CVS", "/tmp"]
+
+# Типы плат которым нужен su qconn
+QCONN_TYPES = {"goz", "c1m", "arktika"}
 
 
 def _icon_path(filename: str) -> str:
-    """Полный путь к файлу иконки. Возвращает пустую строку если файл не найден."""
     path = os.path.join(IMAGES_DIR, filename)
     return path if os.path.exists(path) else ""
 
 
 def _board_icon_path(board_type: str) -> str:
-    """
-    Возвращает путь к иконке по типу платы.
-    Если тип не распознан или файл отсутствует — возвращает путь к logo.png.
-    """
     key      = (board_type or "").strip().lower()
     filename = BOARD_ICON_MAP.get(key, DEFAULT_ICON)
     path     = _icon_path(filename)
-    if not path:
-        # Попробуем fallback на logo.png
-        path = _icon_path(DEFAULT_ICON)
-    return path
+    return path or _icon_path(DEFAULT_ICON)
+
+
+def _board_folders(board_type: str) -> list:
+    key = (board_type or "").strip().lower()
+    return BOARD_FOLDERS.get(key, DEFAULT_FOLDERS)
 
 
 # ============================================================
@@ -93,7 +97,6 @@ except ImportError:
 # ============================================================
 
 def _load_env_file():
-    """Читает .env рядом с .exe / main.py, не перетирает уже заданные переменные."""
     if not os.path.exists(ENV_PATH):
         return
     with open(ENV_PATH, "r", encoding="utf-8") as f:
@@ -109,11 +112,6 @@ def _load_env_file():
 
 
 def load_config() -> dict:
-    """
-    Читает config.yaml.
-    Пароли: env-переменная BENCH_PASSWORD_<NAME> -> поле password в yaml -> пустая строка.
-    Приоритет env позволяет не хранить пароли в репозитории.
-    """
     _load_env_file()
 
     if not HAS_YAML:
@@ -132,17 +130,15 @@ def load_config() -> dict:
         env_key  = f"BENCH_PASSWORD_{name_key}"
         password = os.environ.get(env_key, "") or stand.get("password", "")
         if not password:
-            print(f"WARNING: пароль для '{stand['name']}' не задан "
-                  f"(нет {env_key} и нет поля password в config.yaml)")
+            print(f"WARNING: пароль для '{stand['name']}' не задан")
         stand["password"] = password
 
     return cfg
 
 
 def _default_config() -> dict:
-    """Минимальный конфиг если config.yaml не найден."""
     return {
-        "stands": [],
+        "stands"    : [],
         "monitoring": {"check_interval": 5, "ssh_timeout": 10},
     }
 
@@ -158,17 +154,25 @@ class StandInfo:
         self.ip         = ip
         self.username   = username
         self.password   = password
-        self.status     = "offline"   # "online" | "offline"
+        self.status     = "offline"
         self.connected  = False
         self.stand_type = stand_type
         self.port       = port
         self.ssh_client = None
-        # Папки из config.yaml (cvs, tmp, config)
         self.folders    = folders or {}
+        self.qconn_active = False  # флаг — права qconn получены
+
+    @property
+    def needs_qconn(self) -> bool:
+        return self.stand_type.strip().lower() in QCONN_TYPES
+
+    @property
+    def browse_folders(self) -> list:
+        return _board_folders(self.stand_type)
 
     @property
     def cvs_path(self) -> str:
-        return self.folders.get("cvs", "/home/pkrv/CVS")
+        return self.folders.get("cvs", self.browse_folders[0])
 
 
 # ============================================================
@@ -178,8 +182,8 @@ class StandInfo:
 class BenchConnector:
 
     def __init__(self, config: dict = None):
-        self.config    = config or load_config()
-        self.stands    = {}
+        self.config     = config or load_config()
+        self.stands     = {}
         self.monitoring = False
         self._init_stands()
 
@@ -197,15 +201,10 @@ class BenchConnector:
             )
 
     # ----------------------------------------------------------
-    # Мониторинг доступности
+    # Мониторинг
     # ----------------------------------------------------------
 
     def check_availability(self, ip, port=22) -> bool:
-        """
-        TCP + попытка прочитать SSH-баннер.
-        При timeout на recv считаем online — порт открыт, SSH просто медленный.
-        Сокет всегда закрывается через finally.
-        """
         s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -217,7 +216,7 @@ class BenchConnector:
                 banner = s.recv(64)
                 return banner.startswith(b"SSH")
             except socket.timeout:
-                return True   # порт открыт, баннер не успел — не блокируем
+                return True
         except Exception:
             return False
         finally:
@@ -236,8 +235,6 @@ class BenchConnector:
             interval = self.config.get("monitoring", {}).get("check_interval", 5)
             while self.monitoring:
                 for name, info in list(self.stands.items()):
-                    # Если уже есть активное SSH-соединение — доверяем ему,
-                    # TCP-пинг не трогает живую сессию (race condition fix).
                     if info.connected and info.ssh_client:
                         try:
                             transport = info.ssh_client.get_transport()
@@ -246,18 +243,16 @@ class BenchConnector:
                                 continue
                         except Exception:
                             pass
-                        # Транспорт умер — помечаем как offline и чистим
                         try:
                             info.ssh_client.close()
                         except Exception:
                             pass
-                        info.ssh_client = None
-                        info.connected  = False
-                        info.status     = "offline"
+                        info.ssh_client  = None
+                        info.connected   = False
+                        info.qconn_active = False
+                        info.status      = "offline"
                         continue
-
-                    # Нет активного SSH — проверяем TCP-доступность
-                    available = self.check_availability(info.ip, info.port)
+                    available   = self.check_availability(info.ip, info.port)
                     info.status = "online" if available else "offline"
                 time.sleep(interval)
 
@@ -272,8 +267,10 @@ class BenchConnector:
 
     def connect(self, name, password=None):
         """
-        Синхронное подключение через Paramiko.
-        В GUI вызывать ТОЛЬКО из QThread (см. ConnectWorker), иначе окно зависнет.
+        Подключается по SSH.
+        Для плат ГОЗ/С1М/Арктика автоматически запускает su qconn
+        (ожидаем что /etc/sudoers содержит: pkrv ALL=(qconn) NOPASSWD: ALL).
+        Возвращает (ok, message).
         """
         if not HAS_PARAMIKO:
             return False, "paramiko не установлен"
@@ -287,8 +284,7 @@ class BenchConnector:
         if not pwd:
             return False, (
                 f"Нет пароля для '{name}'. "
-                f"Добавьте BENCH_PASSWORD_{name.upper()} в .env "
-                f"или поле password в config.yaml"
+                f"Добавьте BENCH_PASSWORD_{name.upper()} в .env"
             )
 
         try:
@@ -317,9 +313,23 @@ class BenchConnector:
                 ssh.close()
                 return False, "Сессия открылась, но echo OK не ответил"
 
-            info.ssh_client = ssh
-            info.connected  = True
-            info.status     = "online"
+            info.ssh_client  = ssh
+            info.connected   = True
+            info.status      = "online"
+            info.qconn_active = False
+
+            # Автоматически получаем права qconn для нужных плат
+            if info.needs_qconn:
+                ok_q, msg_q = self._acquire_qconn(info)
+                if ok_q:
+                    info.qconn_active = True
+                    return True, f"Подключено к {name} ({info.ip}) [qconn активен]"
+                else:
+                    return True, (
+                        f"Подключено к {name} ({info.ip}) "
+                        f"[qconn НЕДОСТУПЕН: {msg_q}]"
+                    )
+
             return True, f"Подключено к {name} ({info.ip})"
 
         except AuthenticationException:
@@ -327,9 +337,31 @@ class BenchConnector:
         except SSHException as e:
             return False, f"SSH ошибка: {e}"
         except (socket.timeout, TimeoutError, OSError) as e:
-            return False, f"Таймаут / сетевая ошибка подключения к {info.ip}:{info.port} — {e}"
+            return False, f"Таймаут / сетевая ошибка: {e}"
         except Exception as e:
             return False, f"Ошибка: {e}"
+
+    def _acquire_qconn(self, info: StandInfo):
+        """
+        Проверяет доступность su qconn без пароля (через sudoers NOPASSWD).
+        Выполняет тестовую команду от имени qconn.
+        """
+        try:
+            cmd = "sudo -u qconn id"
+            _, stdout, stderr = info.ssh_client.exec_command(cmd, timeout=8)
+            out = stdout.read().decode("utf-8", errors="replace").strip()
+            err = stderr.read().decode("utf-8", errors="replace").strip()
+
+            if "qconn" in out:
+                return True, "OK"
+            if "password" in err.lower() or "sudo" in err.lower():
+                return False, (
+                    "sudo требует пароль. "
+                    "Добавьте: pkrv ALL=(qconn) NOPASSWD: ALL в /etc/sudoers"
+                )
+            return False, err or "неизвестная ошибка"
+        except Exception as e:
+            return False, str(e)
 
     def disconnect(self, name):
         if name in self.stands:
@@ -340,17 +372,28 @@ class BenchConnector:
                 except Exception:
                     pass
                 info.ssh_client = None
-            info.connected = False
+            info.connected    = False
+            info.qconn_active = False
 
     # ----------------------------------------------------------
     # Выполнение команд
     # ----------------------------------------------------------
 
-    def execute(self, name, command, timeout=30):
-        """Выполнить команду, вернуть (ok, stdout, stderr)."""
+    def execute(self, name, command, timeout=30, as_qconn=False):
+        """
+        Выполнить команду.
+        Если as_qconn=True и плата требует qconn — команда оборачивается
+        в sudo -u qconn bash -c '...'.
+        """
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
+
         info = self.stands[name]
+
+        if as_qconn and info.needs_qconn and info.qconn_active:
+            safe_cmd = command.replace("'", "'\\''")
+            command  = f"sudo -u qconn bash -c '{safe_cmd}'"
+
         try:
             _, stdout, stderr = info.ssh_client.exec_command(command, timeout=timeout)
             out = stdout.read().decode("utf-8", errors="replace")
@@ -362,73 +405,54 @@ class BenchConnector:
             return False, "", str(e)
 
     # ----------------------------------------------------------
-    # Браузер папок — через SSH, не через SFTP
+    # Листинг папки
     # ----------------------------------------------------------
 
-    def list_directory(self, name, path=None):
+    def list_directory(self, name, path):
+        """
+        Список файлов в папке.
+        Для ГОЗ/С1М/Арктика выполняется от qconn (если активен).
+        """
         if name not in self.stands or not self.stands[name].connected:
             return False, [], "Нет подключения"
 
-        info   = self.stands[name]
-        target = path or info.cvs_path
+        info       = self.stands[name]
+        as_qconn   = info.needs_qconn and info.qconn_active
+        cmd        = f"ls -la --time-style=+ '{path}' 2>&1"
+        ok, out, _ = self.execute(name, cmd, as_qconn=as_qconn)
 
-        cmd = f"ls -la --time-style=+ '{target}' 2>&1"
-        ok, out, _ = self.execute(name, cmd)
         if not ok:
             return False, [], "Команда не выполнена"
-
         if "No such file" in out or "Permission denied" in out:
             return False, [], out.strip()
 
-        return self._parse_ls(out, target)
+        return self._parse_ls(out, path)
 
-    def list_directory_as_qconn(self, name, path=None):
+    def read_file(self, name, path, max_bytes=65536):
+        """Читает содержимое файла (первые max_bytes байт)."""
         if name not in self.stands or not self.stands[name].connected:
-            return False, [], "Нет подключения"
+            return False, "Нет подключения"
 
-        info   = self.stands[name]
-        target = path or info.cvs_path
-
-        cmd = f'su qconn -c \'ls -la --time-style=+ "{target}"\' 2>&1'
-        ok, out, _ = self.execute(name, cmd)
+        info     = self.stands[name]
+        as_qconn = info.needs_qconn and info.qconn_active
+        # head -c ограничивает размер
+        cmd = f"head -c {max_bytes} '{path}' 2>&1"
+        ok, out, _ = self.execute(name, cmd, timeout=15, as_qconn=as_qconn)
         if not ok:
-            return False, [], "Команда su qconn не выполнена"
-
-        lines = out.strip().splitlines()
-        if lines and lines[0].lower().startswith("password"):
-            return False, [], (
-                "su qconn требует пароль. "
-                "Настройте /etc/sudoers: pkrv ALL=(qconn) NOPASSWD: ALL"
-            )
-
-        return self._parse_ls(out, target)
+            return False, out
+        return True, out
 
     @staticmethod
     def _parse_ls(output: str, base_path: str):
-        """
-        Парсит вывод ls -la --time-style=+ в список словарей.
-
-        Формат строки с --time-style=+:
-          drwxr-xr-x  2 pkrv pkrv  4096  dirname
-          -rw-r--r--  1 pkrv pkrv  1234  file with spaces.txt
-
-        --time-style=+ убирает дату полностью, поэтому после size (поле [4])
-        идёт сразу имя файла, которое может содержать пробелы.
-        Берём его как join от parts[8:] (нумерация: perms links user group size name).
-        Но ls без даты выдаёт 6 полей до имени: perms links user group size name.
-        Поэтому имя = parts[5:] соединённые пробелом.
-        """
         entries = []
         for line in output.strip().splitlines():
             if not line or line.startswith("total"):
                 continue
             parts = line.split()
-            # Минимум 6 полей: perms links user group size name
             if len(parts) < 6:
                 continue
             perms  = parts[0]
             size   = int(parts[4]) if parts[4].isdigit() else 0
-            # Имя файла — всё начиная с 6-го поля (индекс 5), склеиваем пробелом
             fname  = " ".join(parts[5:])
             is_dir = perms.startswith("d")
             if fname in (".", ".."):
@@ -443,7 +467,7 @@ class BenchConnector:
         return True, entries, ""
 
     # ----------------------------------------------------------
-    # Деплой файлов
+    # Деплой
     # ----------------------------------------------------------
 
     def deploy_files(self, name, mode="copy", local_dir=None):
@@ -457,41 +481,28 @@ class BenchConnector:
         mpo_path  = os.path.join(local_dir, "mpo")
         results   = [f"=== Деплой на {name} ===", ""]
 
-        results.append("[1/4] Проверка локального файла...")
         if not os.path.exists(mpo_path):
             return False, "Файл mpo не найден в " + local_dir
-        results.append(f" + найден: {mpo_path}")
-        results.append("")
 
         remote_path = info.cvs_path + "/mpo"
-        results.append(f"[2/4] Копирование -> {remote_path} ...")
         try:
             sftp = info.ssh_client.open_sftp()
             sftp.put(mpo_path, remote_path)
             sftp.close()
-            results.append(" + скопирован")
+            results.append(f" + скопирован -> {remote_path}")
         except Exception as e:
             results.append(f" ОШИБКА SFTP: {e}")
             return False, "\n".join(results)
-        results.append("")
 
         if mode == "move":
             try:
                 os.remove(mpo_path)
                 results.append(" + локальный файл удалён (mode=move)")
             except Exception as e:
-                results.append(f" ! не удалось удалить локальный файл: {e}")
-        results.append("")
+                results.append(f" ! не удалось удалить: {e}")
 
-        results.append("[3/4] Установка прав...")
         ok, _, _ = self.execute(name, f"chmod +x '{remote_path}' && sync")
-        results.append(" + OK" if ok else " ! ошибка chmod")
-        results.append("")
-
-        results.append("[4/4] Проверка на стенде...")
-        ok, out, _ = self.execute(name, f"ls -la '{remote_path}'")
-        results.append(f" + {out.strip()}" if ok else " ! файл не найден")
-        results.append("")
+        results.append(" + chmod OK" if ok else " ! ошибка chmod")
         results.append("=== ДЕПЛОЙ ЗАВЕРШЁН ===")
         return True, "\n".join(results)
 
@@ -508,6 +519,8 @@ class BenchConnector:
             f"=== Диагностика {name} ({info.ip}:{info.port}) ===",
             f"Время    : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"Paramiko : {'установлен' if HAS_PARAMIKO else 'НЕ УСТАНОВЛЕН'}",
+            f"qconn    : {'нужен' if info.needs_qconn else 'не нужен'} | "
+            f"{'активен' if info.qconn_active else 'не активен'}",
             "",
         ]
 
@@ -531,17 +544,14 @@ class BenchConnector:
 
         lines.append("")
         lines.append("--- SSH ---")
-        if not HAS_PARAMIKO:
-            lines.append(" paramiko не установлен — SSH-тест пропущен")
-        else:
+        if HAS_PARAMIKO and info.connected:
+            lines.append(" SSH : активно (уже подключён)")
+        elif HAS_PARAMIKO:
             try:
                 ssh = paramiko.SSHClient()
                 known = os.path.expanduser("~/.ssh/known_hosts")
                 if os.path.exists(known):
-                    try:
-                        ssh.load_host_keys(known)
-                    except Exception:
-                        pass
+                    ssh.load_host_keys(known)
                 ssh.set_missing_host_key_policy(paramiko.WarningPolicy())
                 ssh.connect(hostname=info.ip, port=info.port,
                             username=info.username, password=info.password,
@@ -552,6 +562,8 @@ class BenchConnector:
                 lines.append(" SSH : ОШИБКА АВТОРИЗАЦИИ")
             except Exception as e:
                 lines.append(f" SSH : ОШИБКА — {str(e)[:120]}")
+        else:
+            lines.append(" paramiko не установлен — тест пропущен")
 
         lines += ["", "=== КОНЕЦ ДИАГНОСТИКИ ==="]
         return "\n".join(lines)
@@ -559,47 +571,277 @@ class BenchConnector:
     def get_all_info(self) -> dict:
         return {
             name: {
-                "name"     : s.name,
-                "ip"       : s.ip,
-                "username" : s.username,
-                "status"   : s.status,
-                "connected": s.connected,
-                "type"     : s.stand_type,
-                "port"     : s.port,
+                "name"        : s.name,
+                "ip"          : s.ip,
+                "username"    : s.username,
+                "status"      : s.status,
+                "connected"   : s.connected,
+                "type"        : s.stand_type,
+                "port"        : s.port,
+                "qconn_active": s.qconn_active,
             }
             for name, s in self.stands.items()
         }
 
 
 # ============================================================
-# GUI — QThread для подключения (не блокирует интерфейс)
+# GUI
 # ============================================================
 
+# --- Тёмная industrial-тема (QSS) ---
+DARK_STYLE = """
+QMainWindow, QWidget {
+    background-color: #12151a;
+    color: #c8d0dc;
+    font-family: 'Segoe UI', 'Ubuntu', sans-serif;
+    font-size: 13px;
+}
+
+/* Боковая панель */
+#sidebar {
+    background-color: #0d1117;
+    border-right: 1px solid #1e2530;
+}
+
+/* Заголовки секций */
+#section_label {
+    color: #4a90c4;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 4px 0px 2px 0px;
+}
+
+/* ComboBox */
+QComboBox {
+    background-color: #1a1f2a;
+    border: 1px solid #2a3344;
+    border-radius: 5px;
+    padding: 6px 10px;
+    color: #c8d0dc;
+    min-height: 28px;
+}
+QComboBox:hover {
+    border-color: #4a90c4;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 24px;
+}
+QComboBox QAbstractItemView {
+    background-color: #1a1f2a;
+    border: 1px solid #2a3344;
+    selection-background-color: #243248;
+    color: #c8d0dc;
+}
+
+/* Кнопки */
+QPushButton {
+    background-color: #1e2738;
+    border: 1px solid #2a3a54;
+    border-radius: 5px;
+    color: #a8b8cc;
+    padding: 7px 12px;
+    min-height: 28px;
+    font-weight: 500;
+}
+QPushButton:hover {
+    background-color: #243248;
+    border-color: #4a90c4;
+    color: #e0eaf8;
+}
+QPushButton:pressed {
+    background-color: #1a2840;
+}
+QPushButton:disabled {
+    background-color: #151a22;
+    color: #3a4455;
+    border-color: #1e2530;
+}
+
+/* Кнопка «Подключиться» — акцент */
+#btn_connect {
+    background-color: #1a3a5c;
+    border-color: #2a6090;
+    color: #70b8f0;
+}
+#btn_connect:hover {
+    background-color: #1e4a72;
+    border-color: #4a90c4;
+    color: #a0d0ff;
+}
+#btn_connect:disabled {
+    background-color: #0e2030;
+    color: #1a4060;
+    border-color: #102030;
+}
+
+/* Кнопка «Отключиться» */
+#btn_disconnect {
+    background-color: #3a1a1a;
+    border-color: #602020;
+    color: #c06060;
+}
+#btn_disconnect:hover {
+    background-color: #4a2020;
+    border-color: #904040;
+    color: #ff8080;
+}
+
+/* TreeWidget */
+QTreeWidget {
+    background-color: #0f1319;
+    border: 1px solid #1e2530;
+    alternate-background-color: #121620;
+    color: #b8c4d4;
+    border-radius: 4px;
+}
+QTreeWidget::item {
+    padding: 4px 8px;
+    border-bottom: 1px solid #181e28;
+}
+QTreeWidget::item:hover {
+    background-color: #1a2234;
+}
+QTreeWidget::item:selected {
+    background-color: #1e3050;
+    color: #d0e8ff;
+}
+QHeaderView::section {
+    background-color: #141820;
+    color: #5a7a9a;
+    border: none;
+    border-bottom: 1px solid #1e2530;
+    padding: 5px 8px;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+/* Лог */
+QTextEdit {
+    background-color: #0a0d12;
+    border: 1px solid #1e2530;
+    border-radius: 4px;
+    color: #6a9060;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 11px;
+    padding: 4px;
+}
+
+/* Разделитель */
+QSplitter::handle {
+    background-color: #1e2530;
+    width: 2px;
+    height: 2px;
+}
+
+/* Статус-бар */
+QStatusBar {
+    background-color: #0a0d12;
+    color: #3a5070;
+    border-top: 1px solid #1e2530;
+    font-size: 11px;
+}
+
+/* ScrollBar */
+QScrollBar:vertical {
+    background-color: #0d1117;
+    width: 8px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background-color: #2a3a54;
+    border-radius: 4px;
+    min-height: 30px;
+}
+QScrollBar::handle:vertical:hover {
+    background-color: #3a5070;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+
+QScrollBar:horizontal {
+    background-color: #0d1117;
+    height: 8px;
+}
+QScrollBar::handle:horizontal {
+    background-color: #2a3a54;
+    border-radius: 4px;
+    min-width: 30px;
+}
+
+/* Панель пути */
+#path_bar {
+    background-color: #0d1117;
+    border: 1px solid #1e2530;
+    border-radius: 4px;
+    color: #4a90c4;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 11px;
+    padding: 4px 8px;
+}
+
+/* Просмотр файла */
+#file_viewer {
+    background-color: #070a0f;
+    border: 1px solid #1e2530;
+    border-radius: 4px;
+    color: #80b060;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 11px;
+    padding: 6px;
+}
+
+/* Разделительная линия */
+#hline {
+    background-color: #1e2530;
+    max-height: 1px;
+    min-height: 1px;
+    border: none;
+}
+
+/* Индикатор статуса */
+#status_dot {
+    font-size: 12px;
+    font-weight: bold;
+    padding: 4px 0px;
+}
+
+/* Тип платы */
+#board_type_label {
+    color: #3a5a7a;
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 2px 0px;
+}
+"""
+
+
 def _build_gui(bc: BenchConnector):
-    """Строит и запускает PyQt5 GUI. Вызывается только из main()."""
 
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QLabel, QTextEdit, QTreeWidget, QTreeWidgetItem,
-        QSplitter, QComboBox, QStatusBar, QMessageBox, QFrame,
+        QSplitter, QComboBox, QStatusBar, QMessageBox, QFrame, QListWidget,
+        QListWidgetItem, QTabWidget, QAbstractItemView,
     )
     from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
-    from PyQt5.QtGui import QFont, QIcon, QPixmap
+    from PyQt5.QtGui import QFont, QIcon, QPixmap, QColor
 
-    # ----------------------------------------------------------
-    # Вспомогательная функция — загрузить QIcon по пути.
-    # Возвращает QIcon (пустой если файл не найден — Qt не упадёт).
-    # ----------------------------------------------------------
     def load_icon(path: str) -> QIcon:
         if path and os.path.exists(path):
             return QIcon(path)
         return QIcon()
 
     # ----------------------------------------------------------
-    # Worker — подключение в фоновом потоке
+    # Workers
     # ----------------------------------------------------------
+
     class ConnectWorker(QThread):
-        finished = pyqtSignal(bool, str, str)  # ok, message, stand_name
+        finished = pyqtSignal(bool, str, str)
         log      = pyqtSignal(str)
 
         def __init__(self, connector, stand_name):
@@ -610,34 +852,40 @@ def _build_gui(bc: BenchConnector):
         def run(self):
             self.log.emit(f"Подключаемся к {self.stand_name}...")
             ok, msg = self.connector.connect(self.stand_name)
-            self.finished.emit(ok, msg, self.stand_name)  # имя стенда фиксируем здесь
+            self.finished.emit(ok, msg, self.stand_name)
 
-    # ----------------------------------------------------------
-    # Worker — листинг папки в фоновом потоке
-    # ----------------------------------------------------------
     class ListDirWorker(QThread):
-        finished = pyqtSignal(bool, list, str)
+        finished = pyqtSignal(bool, list, str, str)  # ok, entries, err, path
         log      = pyqtSignal(str)
 
-        def __init__(self, connector, stand_name, path, as_qconn=False):
+        def __init__(self, connector, stand_name, path):
             super().__init__()
             self.connector  = connector
             self.stand_name = stand_name
             self.path       = path
-            self.as_qconn   = as_qconn
 
         def run(self):
-            if self.as_qconn:
-                ok, entries, err = self.connector.list_directory_as_qconn(
-                    self.stand_name, self.path)
-            else:
-                ok, entries, err = self.connector.list_directory(
-                    self.stand_name, self.path)
-            self.finished.emit(ok, entries, err)
+            ok, entries, err = self.connector.list_directory(
+                self.stand_name, self.path)
+            self.finished.emit(ok, entries, err, self.path)
+
+    class ReadFileWorker(QThread):
+        finished = pyqtSignal(bool, str, str)  # ok, content, path
+
+        def __init__(self, connector, stand_name, path):
+            super().__init__()
+            self.connector  = connector
+            self.stand_name = stand_name
+            self.path       = path
+
+        def run(self):
+            ok, content = self.connector.read_file(self.stand_name, self.path)
+            self.finished.emit(ok, content, self.path)
 
     # ----------------------------------------------------------
     # Главное окно
     # ----------------------------------------------------------
+
     class MainWindow(QMainWindow):
 
         def __init__(self, connector):
@@ -647,158 +895,244 @@ def _build_gui(bc: BenchConnector):
             self.current_path  = None
             self._workers      = []
 
-            self.setWindowTitle("Bench Manager v3.0")
-            self.setMinimumSize(900, 600)
+            self.setWindowTitle("BENCH MANAGER  v4.0")
+            self.setMinimumSize(1100, 680)
+            self.resize(1280, 760)
 
-            # Иконка приложения — logo.png
-            app_icon_path = _icon_path(DEFAULT_ICON)
-            if app_icon_path:
-                self.setWindowIcon(QIcon(app_icon_path))
+            app_icon = _icon_path(DEFAULT_ICON)
+            if app_icon:
+                self.setWindowIcon(QIcon(app_icon))
 
             self._build_ui()
             self._start_status_timer()
 
-        # ---------- UI ----------
+        # ---- UI ----
 
         def _build_ui(self):
             central = QWidget()
             self.setCentralWidget(central)
             root = QHBoxLayout(central)
-            root.setContentsMargins(6, 6, 6, 6)
+            root.setContentsMargins(0, 0, 0, 0)
+            root.setSpacing(0)
 
-            splitter = QSplitter(Qt.Horizontal)
-            root.addWidget(splitter)
+            # ===================== SIDEBAR =====================
+            sidebar = QWidget()
+            sidebar.setObjectName("sidebar")
+            sidebar.setFixedWidth(220)
+            sv = QVBoxLayout(sidebar)
+            sv.setContentsMargins(12, 14, 12, 10)
+            sv.setSpacing(8)
 
-            # Левая панель — список стендов
-            left = QWidget()
-            left.setFixedWidth(240)
-            lv = QVBoxLayout(left)
-            lv.setContentsMargins(4, 4, 4, 4)
-            lv.setSpacing(6)
-
-            # Логотип приложения в верхней части боковой панели
+            # Лого
             logo_path = _icon_path(DEFAULT_ICON)
             if logo_path:
-                logo_label = QLabel()
-                pixmap = QPixmap(logo_path).scaled(
-                    200, 60,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
-                )
-                logo_label.setPixmap(pixmap)
-                logo_label.setAlignment(Qt.AlignCenter)
-                lv.addWidget(logo_label)
+                logo_lbl = QLabel()
+                logo_lbl.setPixmap(
+                    QPixmap(logo_path).scaled(
+                        160, 52, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                logo_lbl.setAlignment(Qt.AlignCenter)
+                sv.addWidget(logo_lbl)
 
-                line_top = QFrame()
-                line_top.setFrameShape(QFrame.HLine)
-                lv.addWidget(line_top)
+            # Иконка текущей платы
+            self.board_icon_lbl = QLabel()
+            self.board_icon_lbl.setAlignment(Qt.AlignCenter)
+            self.board_icon_lbl.setFixedHeight(80)
+            sv.addWidget(self.board_icon_lbl)
 
-            lv.addWidget(QLabel("Стенды:"))
+            self.board_type_lbl = QLabel()
+            self.board_type_lbl.setObjectName("board_type_label")
+            self.board_type_lbl.setAlignment(Qt.AlignCenter)
+            sv.addWidget(self.board_type_lbl)
 
-            # ComboBox стендов — с иконкой платы для каждого стенда
+            self._sep(sv)
+
+            lbl_stands = QLabel("СТЕНД")
+            lbl_stands.setObjectName("section_label")
+            sv.addWidget(lbl_stands)
+
             self.stand_combo = QComboBox()
-            self.stand_combo.setIconSize(QSize(24, 24))
+            self.stand_combo.setIconSize(QSize(20, 20))
             for name, info in self.bc.stands.items():
                 icon = load_icon(_board_icon_path(info.stand_type))
                 self.stand_combo.addItem(icon, name)
-            # При смене стенда обновляем иконку стенда в заголовке
             self.stand_combo.currentIndexChanged.connect(self._on_stand_changed)
-            lv.addWidget(self.stand_combo)
+            sv.addWidget(self.stand_combo)
+            self._update_board_icon()
 
-            # Иконка текущего стенда (крупная, под комбобоксом)
-            self.stand_icon_label = QLabel()
-            self.stand_icon_label.setAlignment(Qt.AlignCenter)
-            lv.addWidget(self.stand_icon_label)
-            self._update_stand_icon()   # показываем иконку сразу
+            self._sep(sv)
 
-            self.btn_connect = QPushButton("Подключиться")
+            lbl_conn = QLabel("ПОДКЛЮЧЕНИЕ")
+            lbl_conn.setObjectName("section_label")
+            sv.addWidget(lbl_conn)
+
+            self.btn_connect = QPushButton("⏎  Подключиться")
+            self.btn_connect.setObjectName("btn_connect")
             self.btn_connect.clicked.connect(self._on_connect)
-            lv.addWidget(self.btn_connect)
+            sv.addWidget(self.btn_connect)
 
-            self.btn_disconnect = QPushButton("Отключиться")
+            self.btn_disconnect = QPushButton("✕  Отключиться")
+            self.btn_disconnect.setObjectName("btn_disconnect")
             self.btn_disconnect.setEnabled(False)
             self.btn_disconnect.clicked.connect(self._on_disconnect)
-            lv.addWidget(self.btn_disconnect)
+            sv.addWidget(self.btn_disconnect)
 
-            line = QFrame()
-            line.setFrameShape(QFrame.HLine)
-            lv.addWidget(line)
+            self._sep(sv)
 
-            self.btn_browse = QPushButton("Открыть папки (pkrv)")
-            self.btn_browse.setEnabled(False)
-            self.btn_browse.clicked.connect(self._on_browse)
-            lv.addWidget(self.btn_browse)
+            lbl_tools = QLabel("ИНСТРУМЕНТЫ")
+            lbl_tools.setObjectName("section_label")
+            sv.addWidget(lbl_tools)
 
-            self.btn_browse_qconn = QPushButton("Открыть папки (qconn)")
-            self.btn_browse_qconn.setEnabled(False)
-            self.btn_browse_qconn.clicked.connect(self._on_browse_qconn)
-            lv.addWidget(self.btn_browse_qconn)
-
-            self.btn_diagnose = QPushButton("Диагностика")
+            self.btn_diagnose = QPushButton("⚙  Диагностика")
             self.btn_diagnose.clicked.connect(self._on_diagnose)
-            lv.addWidget(self.btn_diagnose)
+            sv.addWidget(self.btn_diagnose)
 
-            lv.addStretch()
+            sv.addStretch()
+            self._sep(sv)
 
-            # Индикатор статуса
-            self.status_dot = QLabel("● offline")
-            self.status_dot.setStyleSheet("color: gray;")
-            lv.addWidget(self.status_dot)
+            # Статус
+            self.status_dot = QLabel("●  offline")
+            self.status_dot.setObjectName("status_dot")
+            self.status_dot.setStyleSheet("color: #334455;")
+            self.status_dot.setAlignment(Qt.AlignCenter)
+            sv.addWidget(self.status_dot)
 
-            splitter.addWidget(left)
+            self.qconn_lbl = QLabel("")
+            self.qconn_lbl.setAlignment(Qt.AlignCenter)
+            self.qconn_lbl.setStyleSheet("color: #3a5a3a; font-size: 10px;")
+            sv.addWidget(self.qconn_lbl)
 
-            # Правая панель
-            right_splitter = QSplitter(Qt.Vertical)
+            root.addWidget(sidebar)
+
+            # ===================== RIGHT PANEL =====================
+            right_widget = QWidget()
+            rv = QVBoxLayout(right_widget)
+            rv.setContentsMargins(0, 0, 0, 0)
+            rv.setSpacing(0)
+
+            # Верхняя панель — путь + быстрые папки
+            top_bar = QWidget()
+            top_bar.setStyleSheet("background-color: #0d1117; border-bottom: 1px solid #1e2530;")
+            top_bar.setFixedHeight(46)
+            tbh = QHBoxLayout(top_bar)
+            tbh.setContentsMargins(10, 6, 10, 6)
+            tbh.setSpacing(8)
+
+            tbh.addWidget(QLabel("📁"))
+            self.path_label = QLabel("/")
+            self.path_label.setObjectName("path_bar")
+            self.path_label.setMinimumWidth(200)
+            tbh.addWidget(self.path_label, 1)
+
+            self.btn_up = QPushButton("↑  Вверх")
+            self.btn_up.setFixedWidth(90)
+            self.btn_up.setEnabled(False)
+            self.btn_up.clicked.connect(self._on_go_up)
+            tbh.addWidget(self.btn_up)
+
+            tbh.addWidget(QLabel("Перейти:"))
+            self.folder_combo = QComboBox()
+            self.folder_combo.setFixedWidth(200)
+            self.folder_combo.activated.connect(self._on_quick_folder)
+            tbh.addWidget(self.folder_combo)
+
+            rv.addWidget(top_bar)
+
+            # Основной сплиттер — дерево файлов | просмотр файла
+            main_splitter = QSplitter(Qt.Horizontal)
 
             # Дерево файлов
             self.file_tree = QTreeWidget()
             self.file_tree.setHeaderLabels(["Имя", "Тип", "Размер", "Права"])
-            self.file_tree.setColumnWidth(0, 280)
-            self.file_tree.setColumnWidth(1, 60)
-            self.file_tree.setColumnWidth(2, 80)
+            self.file_tree.setColumnWidth(0, 320)
+            self.file_tree.setColumnWidth(1,  60)
+            self.file_tree.setColumnWidth(2,  90)
+            self.file_tree.setColumnWidth(3, 110)
+            self.file_tree.setAlternatingRowColors(True)
+            self.file_tree.setSortingEnabled(True)
             self.file_tree.itemDoubleClicked.connect(self._on_tree_double_click)
-            right_splitter.addWidget(self.file_tree)
+            self.file_tree.itemClicked.connect(self._on_tree_click)
+            main_splitter.addWidget(self.file_tree)
 
-            # Лог
+            # Правая часть — вкладки: просмотр файла / лог
+            right_tabs = QTabWidget()
+            right_tabs.setStyleSheet("""
+                QTabWidget::pane { border: none; background: #0a0d12; }
+                QTabBar::tab { background: #0d1117; color: #3a5070; padding: 6px 16px;
+                               border: 1px solid #1e2530; border-bottom: none;
+                               font-size: 11px; letter-spacing: 1px; }
+                QTabBar::tab:selected { background: #0a0d12; color: #4a90c4;
+                                        border-bottom: 1px solid #0a0d12; }
+                QTabBar::tab:hover { color: #7ab0e0; }
+            """)
+
+            self.file_viewer = QTextEdit()
+            self.file_viewer.setObjectName("file_viewer")
+            self.file_viewer.setReadOnly(True)
+            self.file_viewer.setPlaceholderText(
+                "Кликните по файлу для просмотра содержимого...")
+            right_tabs.addTab(self.file_viewer, "ФАЙЛ")
+
             self.log_box = QTextEdit()
             self.log_box.setReadOnly(True)
-            self.log_box.setFont(QFont("Courier New", 9))
-            self.log_box.setMaximumHeight(180)
-            right_splitter.addWidget(self.log_box)
+            self.log_box.setFont(QFont("Consolas", 10))
+            self.log_box.setStyleSheet(
+                "background-color: #070a0f; color: #6a9060; "
+                "border: none; padding: 6px;")
+            right_tabs.addTab(self.log_box, "ЛОГ")
 
-            splitter.addWidget(right_splitter)
-            splitter.setSizes([240, 660])
+            self.right_tabs = right_tabs
+            main_splitter.addWidget(right_tabs)
+            main_splitter.setSizes([560, 420])
+
+            # Нижний сплиттер — файловое дерево + файловый просмотр | лог
+            content_splitter = QSplitter(Qt.Vertical)
+            content_splitter.addWidget(main_splitter)
+            content_splitter.setSizes([600])
+
+            rv.addWidget(content_splitter, 1)
+
+            root.addWidget(right_widget, 1)
 
             self.setStatusBar(QStatusBar())
+            self.setStyleSheet(DARK_STYLE)
 
-        # ---------- Иконки стендов ----------
+        # ---- Вспомогательные ----
 
-        def _update_stand_icon(self):
-            """Обновляет крупную иконку платы под комбобоксом."""
+        def _sep(self, layout):
+            line = QFrame()
+            line.setObjectName("hline")
+            line.setFrameShape(QFrame.HLine)
+            layout.addWidget(line)
+
+        def _update_board_icon(self):
             name = self.stand_combo.currentText()
             if not name or name not in self.bc.stands:
-                self.stand_icon_label.clear()
+                self.board_icon_lbl.clear()
+                self.board_type_lbl.clear()
                 return
-
             info      = self.bc.stands[name]
             icon_path = _board_icon_path(info.stand_type)
             if icon_path:
-                pixmap = QPixmap(icon_path).scaled(
-                    180, 90,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
-                )
-                self.stand_icon_label.setPixmap(pixmap)
-                # Подпись с типом платы под иконкой
-                board_type = info.stand_type or "unknown"
-                self.stand_icon_label.setToolTip(f"Тип платы: {board_type}")
+                self.board_icon_lbl.setPixmap(
+                    QPixmap(icon_path).scaled(
+                        180, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
-                self.stand_icon_label.clear()
+                self.board_icon_lbl.clear()
+            self.board_type_lbl.setText(info.stand_type.upper() or "UNKNOWN")
 
-        def _on_stand_changed(self, _index):
-            self._update_stand_icon()
+        def _update_folder_combo(self):
+            name = self.stand_combo.currentText()
+            self.folder_combo.clear()
+            if not name or name not in self.bc.stands:
+                return
+            for folder in self.bc.stands[name].browse_folders:
+                self.folder_combo.addItem(folder)
 
-        # ---------- Таймер статуса ----------
+        def _on_stand_changed(self, _):
+            self._update_board_icon()
+            self._update_folder_combo()
+
+        # ---- Таймер статуса ----
 
         def _start_status_timer(self):
             self._timer = QTimer(self)
@@ -811,24 +1145,31 @@ def _build_gui(bc: BenchConnector):
                 return
             info = self.bc.stands[name]
             if info.connected:
-                self.status_dot.setText("● connected")
-                self.status_dot.setStyleSheet("color: limegreen;")
+                self.status_dot.setText("●  connected")
+                self.status_dot.setStyleSheet("color: #40c060; font-size: 12px; font-weight: bold;")
+                qconn_txt = "[qconn]" if info.qconn_active else ""
+                self.qconn_lbl.setText(qconn_txt)
+                self.qconn_lbl.setStyleSheet(
+                    "color: #409040; font-size: 10px;" if info.qconn_active
+                    else "color: #3a5a3a; font-size: 10px;")
             elif info.status == "online":
-                self.status_dot.setText("● online")
-                self.status_dot.setStyleSheet("color: green;")
+                self.status_dot.setText("●  online")
+                self.status_dot.setStyleSheet("color: #3090a0; font-size: 12px; font-weight: bold;")
+                self.qconn_lbl.setText("")
             else:
-                self.status_dot.setText("● offline")
-                self.status_dot.setStyleSheet("color: gray;")
+                self.status_dot.setText("●  offline")
+                self.status_dot.setStyleSheet("color: #334455; font-size: 12px; font-weight: bold;")
+                self.qconn_lbl.setText("")
 
-        # ---------- Подключение ----------
+        # ---- Подключение ----
 
         def _on_connect(self):
             name = self.stand_combo.currentText()
             if not name:
                 return
             self.btn_connect.setEnabled(False)
-            self.btn_connect.setText("Подключение...")
-            self._log(f"Подключаемся к {name}...")
+            self.btn_connect.setText("⏳  Подключение...")
+            self._log(f"▶ Подключаемся к {name}...")
 
             worker = ConnectWorker(self.bc, name)
             worker.log.connect(self._log)
@@ -837,18 +1178,17 @@ def _build_gui(bc: BenchConnector):
             worker.start()
 
         def _on_connect_done(self, ok, msg, stand_name):
-            # stand_name — имя стенда из worker, не из комбобокса.
-            # Это важно: пользователь мог сменить выбор пока шло подключение.
-            self.btn_connect.setText("Подключиться")
+            self.btn_connect.setText("⏎  Подключиться")
             if ok:
                 self.btn_connect.setEnabled(False)
                 self.btn_disconnect.setEnabled(True)
-                self.btn_browse.setEnabled(True)
-                self.btn_browse_qconn.setEnabled(True)
+                self.btn_up.setEnabled(True)
                 self._log(f"✓ {msg}")
                 self.statusBar().showMessage(msg)
                 self.current_stand = stand_name
-                self.current_path  = self.bc.stands[stand_name].cvs_path
+                info = self.bc.stands[stand_name]
+                self.current_path  = info.browse_folders[0]
+                self._update_folder_combo()
                 self._load_directory(stand_name, self.current_path)
             else:
                 self.btn_connect.setEnabled(True)
@@ -860,78 +1200,105 @@ def _build_gui(bc: BenchConnector):
             self.bc.disconnect(name)
             self.btn_connect.setEnabled(True)
             self.btn_disconnect.setEnabled(False)
-            self.btn_browse.setEnabled(False)
-            self.btn_browse_qconn.setEnabled(False)
+            self.btn_up.setEnabled(False)
             self.file_tree.clear()
-            self._log(f"Отключено от {name}")
+            self.file_viewer.clear()
+            self.path_label.setText("/")
+            self.current_path = None
+            self._log(f"✕ Отключено от {name}")
 
-        # ---------- Браузер папок ----------
+        # ---- Навигация по папкам ----
 
-        def _on_browse(self):
-            name = self.stand_combo.currentText()
-            if not name:
+        def _on_quick_folder(self, index):
+            path = self.folder_combo.itemText(index)
+            if path and self.current_stand:
+                self.current_path = path
+                self._load_directory(self.current_stand, path)
+
+        def _on_go_up(self):
+            if not self.current_path or not self.current_stand:
                 return
-            self.current_stand = name
-            self.current_path  = self.bc.stands[name].cvs_path
-            self._load_directory(name, self.current_path, as_qconn=False)
+            parent = os.path.dirname(self.current_path.rstrip("/")) or "/"
+            self.current_path = parent
+            self._load_directory(self.current_stand, parent)
 
-        def _on_browse_qconn(self):
-            name = self.stand_combo.currentText()
-            if not name:
-                return
-            self.current_stand = name
-            self.current_path  = self.bc.stands[name].cvs_path
-            self._load_directory(name, self.current_path, as_qconn=True)
-
-        def _load_directory(self, stand_name, path, as_qconn=False):
+        def _load_directory(self, stand_name, path):
             self.file_tree.clear()
-            mode = "qconn" if as_qconn else "pkrv"
-            self._log(f"Загрузка {path} [{mode}]...")
+            self.file_viewer.clear()
+            self.path_label.setText(path)
+            self._log(f"  cd {path}")
             self.statusBar().showMessage(f"Загрузка {path}...")
 
-            worker = ListDirWorker(self.bc, stand_name, path, as_qconn=as_qconn)
-            worker.log.connect(self._log)
-            worker.finished.connect(
-                lambda ok, entries, err: self._on_dir_loaded(ok, entries, err, path)
-            )
+            worker = ListDirWorker(self.bc, stand_name, path)
+            worker.finished.connect(self._on_dir_loaded)
             self._workers.append(worker)
             worker.start()
 
         def _on_dir_loaded(self, ok, entries, err, path):
             self.file_tree.clear()
             if not ok:
-                self._log(f"✗ {err}")
+                self._log(f"  ✗ {err}")
                 self.statusBar().showMessage(f"Ошибка: {err}")
                 return
-
             if not entries:
-                self._log("  (папка пуста или нет прав)")
+                self._log("  (пусто или нет прав)")
                 self.statusBar().showMessage(f"{path} — пусто")
                 return
 
-            for e in sorted(entries, key=lambda x: (not x["is_dir"], x["name"].lower())):
-                icon = "[D]" if e["is_dir"] else "[F]"
-                size = f"{e['size']:,}" if not e["is_dir"] else ""
-                item = QTreeWidgetItem([
-                    f"{icon} {e['name']}",
-                    "папка" if e["is_dir"] else "файл",
+            dirs  = sorted([e for e in entries if     e["is_dir"]], key=lambda x: x["name"].lower())
+            files = sorted([e for e in entries if not e["is_dir"]], key=lambda x: x["name"].lower())
+
+            for e in dirs + files:
+                is_dir = e["is_dir"]
+                icon   = "📁" if is_dir else "📄"
+                size   = self._fmt_size(e["size"]) if not is_dir else ""
+                item   = QTreeWidgetItem([
+                    f"{icon}  {e['name']}",
+                    "папка" if is_dir else "файл",
                     size,
                     e["perms"],
                 ])
                 item.setData(0, Qt.UserRole, e)
+                if is_dir:
+                    item.setForeground(0, QColor("#4a90c4"))
                 self.file_tree.addTopLevelItem(item)
 
-            self._log(f"  {len(entries)} объектов в {path}")
-            self.statusBar().showMessage(f"{path}  ({len(entries)} объектов)")
+            self._log(f"  {len(dirs)} папок, {len(files)} файлов")
+            self.statusBar().showMessage(
+                f"{path}  •  {len(dirs)} папок, {len(files)} файлов")
 
-        def _on_tree_double_click(self, item, _col):
-            """Двойной клик по папке — заходим внутрь."""
+        def _on_tree_double_click(self, item, _):
             entry = item.data(0, Qt.UserRole)
             if entry and entry["is_dir"] and self.current_stand:
-                self._load_directory(self.current_stand, entry["path"])
                 self.current_path = entry["path"]
+                self._load_directory(self.current_stand, entry["path"])
 
-        # ---------- Диагностика ----------
+        def _on_tree_click(self, item, _):
+            """Одиночный клик по файлу — читаем содержимое."""
+            entry = item.data(0, Qt.UserRole)
+            if entry and not entry["is_dir"] and self.current_stand:
+                self._read_file(self.current_stand, entry["path"])
+
+        def _read_file(self, stand_name, path):
+            self.file_viewer.setPlaceholderText("")
+            self.file_viewer.setText(f"⏳ Загрузка {path}...")
+            self.right_tabs.setCurrentIndex(0)
+
+            worker = ReadFileWorker(self.bc, stand_name, path)
+            worker.finished.connect(self._on_file_read)
+            self._workers.append(worker)
+            worker.start()
+
+        def _on_file_read(self, ok, content, path):
+            if ok:
+                header = f"══ {path} ══\n\n"
+                self.file_viewer.setText(header + content)
+                self._log(f"  ✓ файл прочитан: {path}")
+            else:
+                self.file_viewer.setText(f"✗ Ошибка чтения:\n{content}")
+                self._log(f"  ✗ ошибка чтения {path}")
+
+        # ---- Диагностика ----
 
         def _on_diagnose(self):
             name = self.stand_combo.currentText()
@@ -940,26 +1307,35 @@ def _build_gui(bc: BenchConnector):
             self._log(f"--- Диагностика {name} ---")
             result = self.bc.diagnose_connection(name)
             self._log(result)
+            self.right_tabs.setCurrentIndex(1)
 
-        # ---------- Утилиты ----------
+        # ---- Утилиты ----
 
-        def _log(self, text):
+        @staticmethod
+        def _fmt_size(n: int) -> str:
+            if n < 1024:
+                return f"{n} B"
+            elif n < 1024 * 1024:
+                return f"{n/1024:.1f} KB"
+            elif n < 1024 ** 3:
+                return f"{n/1024/1024:.1f} MB"
+            return f"{n/1024/1024/1024:.2f} GB"
+
+        def _log(self, text: str):
             ts = datetime.now().strftime("%H:%M:%S")
-            self.log_box.append(f"[{ts}] {text}")
+            self.log_box.append(f'<span style="color:#2a4a3a">[{ts}]</span> {text}')
 
         def closeEvent(self, event):
             self.bc.stop_monitoring()
             event.accept()
 
     # ----------------------------------------------------------
-    # Запуск приложения
-    # ----------------------------------------------------------
-    app    = QApplication(sys.argv)
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
 
-    # Иконка в панели задач / Alt-Tab — тоже logo.png
-    app_icon_path = _icon_path(DEFAULT_ICON)
-    if app_icon_path:
-        app.setWindowIcon(QIcon(app_icon_path))
+    app_icon = _icon_path(DEFAULT_ICON)
+    if app_icon:
+        app.setWindowIcon(QIcon(app_icon))
 
     window = MainWindow(bc)
     window.show()
@@ -972,16 +1348,16 @@ def _build_gui(bc: BenchConnector):
 
 def main():
     parser = argparse.ArgumentParser(description="Bench Manager")
-    parser.add_argument("--console",  "-c", action="store_true", help="Подключиться ко всем стендам")
-    parser.add_argument("--check",          action="store_true", help="Показать статус стендов")
+    parser.add_argument("--console",  "-c", action="store_true")
+    parser.add_argument("--check",          action="store_true")
     parser.add_argument("--version",  "-v", action="store_true")
-    parser.add_argument("--info",           action="store_true", help="Версии библиотек")
-    parser.add_argument("--stand",    "-s", type=str,            help="Подключиться к конкретному стенду")
-    parser.add_argument("--diagnose",       type=str,            help="Диагностика стенда")
+    parser.add_argument("--info",           action="store_true")
+    parser.add_argument("--stand",    "-s", type=str)
+    parser.add_argument("--diagnose",       type=str)
     args = parser.parse_args()
 
     if args.version:
-        print("Bench Manager v3.0")
+        print("Bench Manager v4.0")
         return
 
     if args.info:
@@ -1008,11 +1384,12 @@ def main():
 
     if args.check:
         time.sleep(2)
-        print(f"\n{'Стенд':<14} {'IP':>18}  {'Статус'}")
-        print("-" * 44)
+        print(f"\n{'Стенд':<14} {'IP':>18}  {'Статус':<8}  qconn")
+        print("-" * 52)
         for name, info in bc.get_all_info().items():
             s = "ONLINE" if info["status"] == "online" else "offline"
-            print(f" {name:<13} {info['ip']:>16}:{info['port']:<5}  {s}")
+            q = "active" if info.get("qconn_active") else "-"
+            print(f" {name:<13} {info['ip']:>16}:{info['port']:<5}  {s:<8}  {q}")
         bc.stop_monitoring()
         return
 
@@ -1024,7 +1401,6 @@ def main():
         bc.stop_monitoring()
         return
 
-    # GUI режим
     try:
         _build_gui(bc)
     except ImportError as e:
