@@ -46,7 +46,6 @@ BOARD_ICON_MAP = {
 }
 DEFAULT_ICON = "logo.png"
 
-# Папки по типу платы
 BOARD_FOLDERS = {
     "goz"     : ["/home/pkrv/CVS", "/tmp", "/fead_hd", "/fs/"],
     "c1m"     : ["/home/pkrv/CVS", "/tmp", "/fead_hd", "/fs/"],
@@ -55,7 +54,6 @@ BOARD_FOLDERS = {
 }
 DEFAULT_FOLDERS = ["/home/pkrv/CVS", "/tmp"]
 
-# Типы плат которым нужен su qconn
 QCONN_TYPES = {"goz", "c1m", "arktika"}
 
 
@@ -160,7 +158,7 @@ class StandInfo:
         self.port       = port
         self.ssh_client = None
         self.folders    = folders or {}
-        self.qconn_active = False  # флаг — права qconn получены
+        self.qconn_active = False
 
     @property
     def needs_qconn(self) -> bool:
@@ -199,10 +197,6 @@ class BenchConnector:
                 port       = sc.get("port", 22),
                 folders    = sc.get("folders", {}),
             )
-
-    # ----------------------------------------------------------
-    # Мониторинг
-    # ----------------------------------------------------------
 
     def check_availability(self, ip, port=22) -> bool:
         s = None
@@ -247,10 +241,10 @@ class BenchConnector:
                             info.ssh_client.close()
                         except Exception:
                             pass
-                        info.ssh_client  = None
-                        info.connected   = False
+                        info.ssh_client   = None
+                        info.connected    = False
                         info.qconn_active = False
-                        info.status      = "offline"
+                        info.status       = "offline"
                         continue
                     available   = self.check_availability(info.ip, info.port)
                     info.status = "online" if available else "offline"
@@ -261,17 +255,7 @@ class BenchConnector:
     def stop_monitoring(self):
         self.monitoring = False
 
-    # ----------------------------------------------------------
-    # Подключение
-    # ----------------------------------------------------------
-
     def connect(self, name, password=None):
-        """
-        Подключается по SSH.
-        Для плат ГОЗ/С1М/Арктика автоматически запускает su qconn
-        (ожидаем что /etc/sudoers содержит: pkrv ALL=(qconn) NOPASSWD: ALL).
-        Возвращает (ok, message).
-        """
         if not HAS_PARAMIKO:
             return False, "paramiko не установлен"
 
@@ -313,12 +297,11 @@ class BenchConnector:
                 ssh.close()
                 return False, "Сессия открылась, но echo OK не ответил"
 
-            info.ssh_client  = ssh
-            info.connected   = True
-            info.status      = "online"
+            info.ssh_client   = ssh
+            info.connected    = True
+            info.status       = "online"
             info.qconn_active = False
 
-            # Автоматически получаем права qconn для нужных плат
             if info.needs_qconn:
                 ok_q, msg_q = self._acquire_qconn(info)
                 if ok_q:
@@ -342,10 +325,6 @@ class BenchConnector:
             return False, f"Ошибка: {e}"
 
     def _acquire_qconn(self, info: StandInfo):
-        """
-        Проверяет доступность su qconn без пароля (через sudoers NOPASSWD).
-        Выполняет тестовую команду от имени qconn.
-        """
         try:
             cmd = "sudo -u qconn id"
             _, stdout, stderr = info.ssh_client.exec_command(cmd, timeout=8)
@@ -375,16 +354,7 @@ class BenchConnector:
             info.connected    = False
             info.qconn_active = False
 
-    # ----------------------------------------------------------
-    # Выполнение команд
-    # ----------------------------------------------------------
-
     def execute(self, name, command, timeout=30, as_qconn=False):
-        """
-        Выполнить команду.
-        Если as_qconn=True и плата требует qconn — команда оборачивается
-        в sudo -u qconn bash -c '...'.
-        """
         if name not in self.stands or not self.stands[name].connected:
             return False, "", "Нет подключения"
 
@@ -404,21 +374,13 @@ class BenchConnector:
             info.ssh_client = None
             return False, "", str(e)
 
-    # ----------------------------------------------------------
-    # Листинг папки
-    # ----------------------------------------------------------
-
     def list_directory(self, name, path):
-        """
-        Список файлов в папке.
-        Для ГОЗ/С1М/Арктика выполняется от qconn (если активен).
-        """
         if name not in self.stands or not self.stands[name].connected:
             return False, [], "Нет подключения"
 
-        info       = self.stands[name]
-        as_qconn   = info.needs_qconn and info.qconn_active
-        cmd        = f"ls -la --time-style=+ '{path}' 2>&1"
+        info     = self.stands[name]
+        as_qconn = info.needs_qconn and info.qconn_active
+        cmd      = f"ls -la --time-style=+ '{path}' 2>&1"
         ok, out, _ = self.execute(name, cmd, as_qconn=as_qconn)
 
         if not ok:
@@ -429,13 +391,11 @@ class BenchConnector:
         return self._parse_ls(out, path)
 
     def read_file(self, name, path, max_bytes=65536):
-        """Читает содержимое файла (первые max_bytes байт)."""
         if name not in self.stands or not self.stands[name].connected:
             return False, "Нет подключения"
 
         info     = self.stands[name]
         as_qconn = info.needs_qconn and info.qconn_active
-        # head -c ограничивает размер
         cmd = f"head -c {max_bytes} '{path}' 2>&1"
         ok, out, _ = self.execute(name, cmd, timeout=15, as_qconn=as_qconn)
         if not ok:
@@ -465,10 +425,6 @@ class BenchConnector:
                 "path"  : base_path.rstrip("/") + "/" + fname,
             })
         return True, entries, ""
-
-    # ----------------------------------------------------------
-    # Деплой
-    # ----------------------------------------------------------
 
     def deploy_files(self, name, mode="copy", local_dir=None):
         if name not in self.stands:
@@ -505,10 +461,6 @@ class BenchConnector:
         results.append(" + chmod OK" if ok else " ! ошибка chmod")
         results.append("=== ДЕПЛОЙ ЗАВЕРШЁН ===")
         return True, "\n".join(results)
-
-    # ----------------------------------------------------------
-    # Диагностика
-    # ----------------------------------------------------------
 
     def diagnose_connection(self, name) -> str:
         if name not in self.stands:
@@ -585,237 +537,309 @@ class BenchConnector:
 
 
 # ============================================================
-# GUI
+# GUI  —  переработанный тёмный industrial-стиль
 # ============================================================
 
-# --- Тёмная industrial-тема (QSS) ---
 DARK_STYLE = """
+/* ── Базовые виджеты ───────────────────────────────────────── */
 QMainWindow, QWidget {
-    background-color: #12151a;
-    color: #c8d0dc;
+    background-color: #0e1118;
+    color: #b8c8dc;
     font-family: 'Segoe UI', 'Ubuntu', sans-serif;
     font-size: 13px;
 }
 
-/* Боковая панель */
+/* ── Боковая панель ─────────────────────────────────────────── */
 #sidebar {
-    background-color: #0d1117;
-    border-right: 1px solid #1e2530;
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
+        stop:0 #090c12, stop:1 #0e1118);
+    border-right: 1px solid #1c2535;
 }
 
-/* Заголовки секций */
+/* ── Разделитель-секция ─────────────────────────────────────── */
 #section_label {
-    color: #4a90c4;
+    color: #2e6fa3;
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 3px;
+    padding: 6px 0px 3px 2px;
+}
+
+/* ── Комбобокс ──────────────────────────────────────────────── */
+QComboBox {
+    background-color: #131926;
+    border: 1px solid #1e2d42;
+    border-radius: 6px;
+    padding: 7px 12px;
+    color: #c0d0e0;
+    min-height: 30px;
+    selection-background-color: #1e3a5c;
+}
+QComboBox:hover  { border-color: #3a7abf; }
+QComboBox:focus  { border-color: #4a90d9; }
+QComboBox::drop-down { border: none; width: 26px; }
+QComboBox QAbstractItemView {
+    background-color: #131926;
+    border: 1px solid #1e2d42;
+    border-radius: 4px;
+    selection-background-color: #1e3a5c;
+    color: #c0d0e0;
+    padding: 4px;
+}
+
+/* ── Общие кнопки ───────────────────────────────────────────── */
+QPushButton {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #1c2840, stop:1 #141e30);
+    border: 1px solid #253450;
+    border-radius: 6px;
+    color: #90aac8;
+    padding: 8px 14px;
+    min-height: 30px;
+    font-weight: 500;
+    letter-spacing: 0.5px;
+}
+QPushButton:hover {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #243258, stop:1 #1a2848);
+    border-color: #3a7abf;
+    color: #d0e4f8;
+}
+QPushButton:pressed {
+    background-color: #111a2e;
+    border-color: #2a5a8a;
+}
+QPushButton:disabled {
+    background-color: #0e121c;
+    color: #2a3548;
+    border-color: #141c28;
+}
+
+/* ── Кнопка «Подключиться» ──────────────────────────────────── */
+#btn_connect {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #1a4a7a, stop:1 #123258);
+    border-color: #2a6aaa;
+    color: #78c0f0;
+    font-weight: 600;
+}
+#btn_connect:hover {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #205a90, stop:1 #163c70);
+    border-color: #4a9ae0;
+    color: #a8d8ff;
+}
+#btn_connect:disabled {
+    background-color: #0c1c30;
+    color: #1a3a58;
+    border-color: #0e1e30;
+}
+
+/* ── Кнопка «Отключиться» ───────────────────────────────────── */
+#btn_disconnect {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #3a1a1a, stop:1 #281010);
+    border-color: #6a2a2a;
+    color: #c06868;
+    font-weight: 600;
+}
+#btn_disconnect:hover {
+    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+        stop:0 #4a2020, stop:1 #341414);
+    border-color: #9a4040;
+    color: #ff9090;
+}
+
+/* ── Дерево файлов ──────────────────────────────────────────── */
+QTreeWidget {
+    background-color: #0b0f18;
+    border: 1px solid #1a2434;
+    alternate-background-color: #0d1120;
+    color: #a8bccc;
+    border-radius: 6px;
+    outline: none;
+}
+QTreeWidget::item {
+    padding: 5px 10px;
+    border-bottom: 1px solid #131924;
+}
+QTreeWidget::item:hover     { background-color: #162030; }
+QTreeWidget::item:selected  { background-color: #1a3258; color: #d0e8ff; }
+QHeaderView::section {
+    background-color: #0d1220;
+    color: #3a6a9a;
+    border: none;
+    border-bottom: 1px solid #1a2434;
+    border-right: 1px solid #131c2c;
+    padding: 6px 10px;
     font-size: 10px;
     font-weight: bold;
     letter-spacing: 2px;
     text-transform: uppercase;
-    padding: 4px 0px 2px 0px;
 }
 
-/* ComboBox */
-QComboBox {
-    background-color: #1a1f2a;
-    border: 1px solid #2a3344;
-    border-radius: 5px;
-    padding: 6px 10px;
-    color: #c8d0dc;
-    min-height: 28px;
-}
-QComboBox:hover {
-    border-color: #4a90c4;
-}
-QComboBox::drop-down {
-    border: none;
-    width: 24px;
-}
-QComboBox QAbstractItemView {
-    background-color: #1a1f2a;
-    border: 1px solid #2a3344;
-    selection-background-color: #243248;
-    color: #c8d0dc;
-}
-
-/* Кнопки */
-QPushButton {
-    background-color: #1e2738;
-    border: 1px solid #2a3a54;
-    border-radius: 5px;
-    color: #a8b8cc;
-    padding: 7px 12px;
-    min-height: 28px;
-    font-weight: 500;
-}
-QPushButton:hover {
-    background-color: #243248;
-    border-color: #4a90c4;
-    color: #e0eaf8;
-}
-QPushButton:pressed {
-    background-color: #1a2840;
-}
-QPushButton:disabled {
-    background-color: #151a22;
-    color: #3a4455;
-    border-color: #1e2530;
-}
-
-/* Кнопка «Подключиться» — акцент */
-#btn_connect {
-    background-color: #1a3a5c;
-    border-color: #2a6090;
-    color: #70b8f0;
-}
-#btn_connect:hover {
-    background-color: #1e4a72;
-    border-color: #4a90c4;
-    color: #a0d0ff;
-}
-#btn_connect:disabled {
-    background-color: #0e2030;
-    color: #1a4060;
-    border-color: #102030;
-}
-
-/* Кнопка «Отключиться» */
-#btn_disconnect {
-    background-color: #3a1a1a;
-    border-color: #602020;
-    color: #c06060;
-}
-#btn_disconnect:hover {
-    background-color: #4a2020;
-    border-color: #904040;
-    color: #ff8080;
-}
-
-/* TreeWidget */
-QTreeWidget {
-    background-color: #0f1319;
-    border: 1px solid #1e2530;
-    alternate-background-color: #121620;
-    color: #b8c4d4;
-    border-radius: 4px;
-}
-QTreeWidget::item {
-    padding: 4px 8px;
-    border-bottom: 1px solid #181e28;
-}
-QTreeWidget::item:hover {
-    background-color: #1a2234;
-}
-QTreeWidget::item:selected {
-    background-color: #1e3050;
-    color: #d0e8ff;
-}
-QHeaderView::section {
-    background-color: #141820;
-    color: #5a7a9a;
-    border: none;
-    border-bottom: 1px solid #1e2530;
-    padding: 5px 8px;
-    font-size: 11px;
-    font-weight: bold;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-}
-
-/* Лог */
+/* ── Лог / вьюер ────────────────────────────────────────────── */
 QTextEdit {
-    background-color: #0a0d12;
-    border: 1px solid #1e2530;
-    border-radius: 4px;
-    color: #6a9060;
-    font-family: 'Consolas', 'Courier New', monospace;
+    background-color: #080b10;
+    border: 1px solid #1a2434;
+    border-radius: 6px;
+    color: #5a9060;
+    font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
     font-size: 11px;
-    padding: 4px;
+    padding: 6px;
+    selection-background-color: #1e3a5c;
 }
 
-/* Разделитель */
+/* ── Сплиттер ───────────────────────────────────────────────── */
 QSplitter::handle {
-    background-color: #1e2530;
+    background-color: #1a2434;
     width: 2px;
     height: 2px;
 }
+QSplitter::handle:hover { background-color: #3a7abf; }
 
-/* Статус-бар */
+/* ── Статус-бар ─────────────────────────────────────────────── */
 QStatusBar {
-    background-color: #0a0d12;
-    color: #3a5070;
-    border-top: 1px solid #1e2530;
+    background-color: #080b10;
+    color: #304a6a;
+    border-top: 1px solid #1a2434;
     font-size: 11px;
+    padding: 0px 8px;
 }
+QStatusBar::item { border: none; }
 
-/* ScrollBar */
+/* ── Скроллбары ─────────────────────────────────────────────── */
 QScrollBar:vertical {
-    background-color: #0d1117;
-    width: 8px;
+    background-color: #0b0f18;
+    width: 7px;
     margin: 0;
+    border-radius: 3px;
 }
 QScrollBar::handle:vertical {
-    background-color: #2a3a54;
-    border-radius: 4px;
-    min-height: 30px;
+    background-color: #243450;
+    border-radius: 3px;
+    min-height: 28px;
 }
-QScrollBar::handle:vertical:hover {
-    background-color: #3a5070;
-}
+QScrollBar::handle:vertical:hover { background-color: #3a5878; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
 
 QScrollBar:horizontal {
-    background-color: #0d1117;
-    height: 8px;
+    background-color: #0b0f18;
+    height: 7px;
+    border-radius: 3px;
 }
 QScrollBar::handle:horizontal {
-    background-color: #2a3a54;
-    border-radius: 4px;
-    min-width: 30px;
+    background-color: #243450;
+    border-radius: 3px;
+    min-width: 28px;
 }
+QScrollBar::handle:horizontal:hover { background-color: #3a5878; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }
 
-/* Панель пути */
+/* ── Панель пути ─────────────────────────────────────────────── */
 #path_bar {
-    background-color: #0d1117;
-    border: 1px solid #1e2530;
-    border-radius: 4px;
-    color: #4a90c4;
-    font-family: 'Consolas', 'Courier New', monospace;
+    background-color: #0b0f18;
+    border: 1px solid #1a2434;
+    border-radius: 5px;
+    color: #3a8abf;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
     font-size: 11px;
-    padding: 4px 8px;
+    padding: 5px 10px;
 }
 
-/* Просмотр файла */
+/* ── Просмотр файла ─────────────────────────────────────────── */
 #file_viewer {
-    background-color: #070a0f;
-    border: 1px solid #1e2530;
-    border-radius: 4px;
-    color: #80b060;
-    font-family: 'Consolas', 'Courier New', monospace;
+    background-color: #060810;
+    border: 1px solid #1a2434;
+    border-radius: 6px;
+    color: #72b060;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
     font-size: 11px;
-    padding: 6px;
+    padding: 8px;
+    selection-background-color: #1e3a1e;
 }
 
-/* Разделительная линия */
+/* ── Горизонтальная линия-разделитель ───────────────────────── */
 #hline {
-    background-color: #1e2530;
+    background-color: #1a2434;
     max-height: 1px;
     min-height: 1px;
     border: none;
+    margin: 4px 0px;
 }
 
-/* Индикатор статуса */
+/* ── Индикатор статуса ──────────────────────────────────────── */
 #status_dot {
     font-size: 12px;
     font-weight: bold;
     padding: 4px 0px;
+    letter-spacing: 1px;
 }
 
-/* Тип платы */
+/* ── Тип платы ──────────────────────────────────────────────── */
 #board_type_label {
-    color: #3a5a7a;
+    color: #2a4a6a;
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    padding: 1px 0px 4px 0px;
+}
+
+/* ── IP-метка ───────────────────────────────────────────────── */
+#ip_label {
+    color: #2a4a6a;
     font-size: 10px;
-    letter-spacing: 1px;
-    text-transform: uppercase;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
     padding: 2px 0px;
+}
+
+/* ── Заголовок окна-логотип ─────────────────────────────────── */
+#app_title {
+    color: #4a8abf;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 4px;
+    padding: 2px 0px;
+}
+#app_version {
+    color: #1e3a58;
+    font-size: 9px;
+    letter-spacing: 3px;
+}
+
+/* ── Вкладки ────────────────────────────────────────────────── */
+QTabWidget::pane {
+    border: none;
+    background: #080b10;
+}
+QTabBar::tab {
+    background: #0d1220;
+    color: #2e5070;
+    padding: 7px 20px;
+    border: 1px solid #1a2434;
+    border-bottom: none;
+    font-size: 10px;
+    font-weight: bold;
+    letter-spacing: 2px;
+    margin-right: 2px;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+}
+QTabBar::tab:selected {
+    background: #080b10;
+    color: #4a90c4;
+    border-bottom: 1px solid #080b10;
+}
+QTabBar::tab:hover { color: #6ab0e4; }
+
+/* ── ToolTip ─────────────────────────────────────────────────── */
+QToolTip {
+    background-color: #0d1220;
+    color: #90b8d8;
+    border: 1px solid #2a4a6a;
+    border-radius: 4px;
+    padding: 5px 8px;
+    font-size: 11px;
 }
 """
 
@@ -825,20 +849,29 @@ def _build_gui(bc: BenchConnector):
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
         QPushButton, QLabel, QTextEdit, QTreeWidget, QTreeWidgetItem,
-        QSplitter, QComboBox, QStatusBar, QMessageBox, QFrame, QListWidget,
-        QListWidgetItem, QTabWidget, QAbstractItemView,
+        QSplitter, QComboBox, QStatusBar, QMessageBox, QFrame,
+        QTabWidget, QSizePolicy, QGraphicsDropShadowEffect,
     )
-    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
-    from PyQt5.QtGui import QFont, QIcon, QPixmap, QColor
+    from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize, QPropertyAnimation, QEasingCurve
+    from PyQt5.QtGui import QFont, QIcon, QPixmap, QColor, QPalette
 
     def load_icon(path: str) -> QIcon:
         if path and os.path.exists(path):
             return QIcon(path)
         return QIcon()
 
-    # ----------------------------------------------------------
+    def glow_effect(widget, color="#1a4a8a", blur=18):
+        """Мягкое свечение под виджетом."""
+        eff = QGraphicsDropShadowEffect()
+        eff.setBlurRadius(blur)
+        eff.setOffset(0, 0)
+        eff.setColor(QColor(color))
+        widget.setGraphicsEffect(eff)
+        return eff
+
+    # ──────────────────────────────────────────────────────────
     # Workers
-    # ----------------------------------------------------------
+    # ──────────────────────────────────────────────────────────
 
     class ConnectWorker(QThread):
         finished = pyqtSignal(bool, str, str)
@@ -855,8 +888,7 @@ def _build_gui(bc: BenchConnector):
             self.finished.emit(ok, msg, self.stand_name)
 
     class ListDirWorker(QThread):
-        finished = pyqtSignal(bool, list, str, str)  # ok, entries, err, path
-        log      = pyqtSignal(str)
+        finished = pyqtSignal(bool, list, str, str)
 
         def __init__(self, connector, stand_name, path):
             super().__init__()
@@ -865,12 +897,11 @@ def _build_gui(bc: BenchConnector):
             self.path       = path
 
         def run(self):
-            ok, entries, err = self.connector.list_directory(
-                self.stand_name, self.path)
+            ok, entries, err = self.connector.list_directory(self.stand_name, self.path)
             self.finished.emit(ok, entries, err, self.path)
 
     class ReadFileWorker(QThread):
-        finished = pyqtSignal(bool, str, str)  # ok, content, path
+        finished = pyqtSignal(bool, str, str)
 
         def __init__(self, connector, stand_name, path):
             super().__init__()
@@ -882,9 +913,9 @@ def _build_gui(bc: BenchConnector):
             ok, content = self.connector.read_file(self.stand_name, self.path)
             self.finished.emit(ok, content, self.path)
 
-    # ----------------------------------------------------------
+    # ──────────────────────────────────────────────────────────
     # Главное окно
-    # ----------------------------------------------------------
+    # ──────────────────────────────────────────────────────────
 
     class MainWindow(QMainWindow):
 
@@ -894,10 +925,11 @@ def _build_gui(bc: BenchConnector):
             self.current_stand = None
             self.current_path  = None
             self._workers      = []
+            self._pulse_state  = True
 
             self.setWindowTitle("BENCH MANAGER  v4.0")
-            self.setMinimumSize(1100, 680)
-            self.resize(1280, 760)
+            self.setMinimumSize(1120, 700)
+            self.resize(1340, 800)
 
             app_icon = _icon_path(DEFAULT_ICON)
             if app_icon:
@@ -906,7 +938,7 @@ def _build_gui(bc: BenchConnector):
             self._build_ui()
             self._start_status_timer()
 
-        # ---- UI ----
+        # ── Построение UI ──────────────────────────────────────
 
         def _build_ui(self):
             central = QWidget()
@@ -915,28 +947,41 @@ def _build_gui(bc: BenchConnector):
             root.setContentsMargins(0, 0, 0, 0)
             root.setSpacing(0)
 
-            # ===================== SIDEBAR =====================
+            # ═══════════════ SIDEBAR ═══════════════════════════
             sidebar = QWidget()
             sidebar.setObjectName("sidebar")
-            sidebar.setFixedWidth(220)
+            sidebar.setFixedWidth(230)
             sv = QVBoxLayout(sidebar)
-            sv.setContentsMargins(12, 14, 12, 10)
-            sv.setSpacing(8)
+            sv.setContentsMargins(14, 16, 14, 14)
+            sv.setSpacing(6)
 
-            # Лого
+            # --- Логотип + название ---
             logo_path = _icon_path(DEFAULT_ICON)
             if logo_path:
                 logo_lbl = QLabel()
-                logo_lbl.setPixmap(
-                    QPixmap(logo_path).scaled(
-                        160, 52, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                pm = QPixmap(logo_path).scaled(
+                    140, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                logo_lbl.setPixmap(pm)
                 logo_lbl.setAlignment(Qt.AlignCenter)
                 sv.addWidget(logo_lbl)
 
-            # Иконка текущей платы
+            title_lbl = QLabel("BENCH MANAGER")
+            title_lbl.setObjectName("app_title")
+            title_lbl.setAlignment(Qt.AlignCenter)
+            sv.addWidget(title_lbl)
+
+            ver_lbl = QLabel("v4.0  //  SSH CONSOLE")
+            ver_lbl.setObjectName("app_version")
+            ver_lbl.setAlignment(Qt.AlignCenter)
+            sv.addWidget(ver_lbl)
+
+            self._sep(sv)
+
+            # --- Иконка текущей платы ---
             self.board_icon_lbl = QLabel()
             self.board_icon_lbl.setAlignment(Qt.AlignCenter)
-            self.board_icon_lbl.setFixedHeight(80)
+            self.board_icon_lbl.setFixedHeight(90)
+            glow_effect(self.board_icon_lbl, "#0a2a5a", 22)
             sv.addWidget(self.board_icon_lbl)
 
             self.board_type_lbl = QLabel()
@@ -944,8 +989,14 @@ def _build_gui(bc: BenchConnector):
             self.board_type_lbl.setAlignment(Qt.AlignCenter)
             sv.addWidget(self.board_type_lbl)
 
+            self.ip_label = QLabel()
+            self.ip_label.setObjectName("ip_label")
+            self.ip_label.setAlignment(Qt.AlignCenter)
+            sv.addWidget(self.ip_label)
+
             self._sep(sv)
 
+            # --- Выбор стенда ---
             lbl_stands = QLabel("СТЕНД")
             lbl_stands.setObjectName("section_label")
             sv.addWidget(lbl_stands)
@@ -961,142 +1012,177 @@ def _build_gui(bc: BenchConnector):
 
             self._sep(sv)
 
+            # --- Подключение ---
             lbl_conn = QLabel("ПОДКЛЮЧЕНИЕ")
             lbl_conn.setObjectName("section_label")
             sv.addWidget(lbl_conn)
 
-            self.btn_connect = QPushButton("⏎  Подключиться")
+            self.btn_connect = QPushButton("⏎   Подключиться")
             self.btn_connect.setObjectName("btn_connect")
+            self.btn_connect.setToolTip("Установить SSH-соединение со стендом")
             self.btn_connect.clicked.connect(self._on_connect)
+            glow_effect(self.btn_connect, "#0a3a7a", 14)
             sv.addWidget(self.btn_connect)
 
-            self.btn_disconnect = QPushButton("✕  Отключиться")
+            self.btn_disconnect = QPushButton("✕   Отключиться")
             self.btn_disconnect.setObjectName("btn_disconnect")
+            self.btn_disconnect.setToolTip("Закрыть SSH-соединение")
             self.btn_disconnect.setEnabled(False)
             self.btn_disconnect.clicked.connect(self._on_disconnect)
             sv.addWidget(self.btn_disconnect)
 
             self._sep(sv)
 
+            # --- Инструменты ---
             lbl_tools = QLabel("ИНСТРУМЕНТЫ")
             lbl_tools.setObjectName("section_label")
             sv.addWidget(lbl_tools)
 
-            self.btn_diagnose = QPushButton("⚙  Диагностика")
+            self.btn_diagnose = QPushButton("⚙   Диагностика")
+            self.btn_diagnose.setToolTip("Проверить сеть, порт и SSH-доступ")
             self.btn_diagnose.clicked.connect(self._on_diagnose)
             sv.addWidget(self.btn_diagnose)
 
+            self.btn_refresh = QPushButton("↺   Обновить папку")
+            self.btn_refresh.setToolTip("Перечитать текущую директорию")
+            self.btn_refresh.clicked.connect(self._on_refresh)
+            sv.addWidget(self.btn_refresh)
+
             sv.addStretch()
+
             self._sep(sv)
 
-            # Статус
-            self.status_dot = QLabel("●  offline")
+            # --- Статус ---
+            self.status_dot = QLabel("●   OFFLINE")
             self.status_dot.setObjectName("status_dot")
-            self.status_dot.setStyleSheet("color: #334455;")
+            self.status_dot.setStyleSheet("color: #253545;")
             self.status_dot.setAlignment(Qt.AlignCenter)
             sv.addWidget(self.status_dot)
 
             self.qconn_lbl = QLabel("")
             self.qconn_lbl.setAlignment(Qt.AlignCenter)
-            self.qconn_lbl.setStyleSheet("color: #3a5a3a; font-size: 10px;")
+            self.qconn_lbl.setStyleSheet("color: #2a4a2a; font-size: 10px; letter-spacing:1px;")
             sv.addWidget(self.qconn_lbl)
 
             root.addWidget(sidebar)
 
-            # ===================== RIGHT PANEL =====================
+            # ═══════════════ ПРАВАЯ ЧАСТЬ ══════════════════════
             right_widget = QWidget()
             rv = QVBoxLayout(right_widget)
             rv.setContentsMargins(0, 0, 0, 0)
             rv.setSpacing(0)
 
-            # Верхняя панель — путь + быстрые папки
+            # --- Топ-бар (путь + быстрые папки) ---
             top_bar = QWidget()
-            top_bar.setStyleSheet("background-color: #0d1117; border-bottom: 1px solid #1e2530;")
-            top_bar.setFixedHeight(46)
+            top_bar.setStyleSheet(
+                "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                "stop:0 #0a0e18, stop:1 #0c1020);"
+                "border-bottom: 1px solid #1a2434;")
+            top_bar.setFixedHeight(50)
             tbh = QHBoxLayout(top_bar)
-            tbh.setContentsMargins(10, 6, 10, 6)
-            tbh.setSpacing(8)
+            tbh.setContentsMargins(12, 8, 12, 8)
+            tbh.setSpacing(10)
 
-            tbh.addWidget(QLabel("📁"))
+            path_icon = QLabel("📁")
+            path_icon.setStyleSheet("font-size: 14px;")
+            tbh.addWidget(path_icon)
+
             self.path_label = QLabel("/")
             self.path_label.setObjectName("path_bar")
-            self.path_label.setMinimumWidth(200)
+            self.path_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             tbh.addWidget(self.path_label, 1)
 
             self.btn_up = QPushButton("↑  Вверх")
-            self.btn_up.setFixedWidth(90)
+            self.btn_up.setFixedWidth(95)
+            self.btn_up.setToolTip("Перейти в родительскую директорию")
             self.btn_up.setEnabled(False)
             self.btn_up.clicked.connect(self._on_go_up)
             tbh.addWidget(self.btn_up)
 
-            tbh.addWidget(QLabel("Перейти:"))
+            nav_lbl = QLabel("Быстрый переход:")
+            nav_lbl.setStyleSheet("color: #2a4a6a; font-size: 11px;")
+            tbh.addWidget(nav_lbl)
+
             self.folder_combo = QComboBox()
-            self.folder_combo.setFixedWidth(200)
+            self.folder_combo.setFixedWidth(210)
+            self.folder_combo.setToolTip("Перейти в предустановленную папку")
             self.folder_combo.activated.connect(self._on_quick_folder)
             tbh.addWidget(self.folder_combo)
 
             rv.addWidget(top_bar)
 
-            # Основной сплиттер — дерево файлов | просмотр файла
+            # --- Главный сплиттер ---
             main_splitter = QSplitter(Qt.Horizontal)
+            main_splitter.setHandleWidth(3)
 
             # Дерево файлов
+            tree_container = QWidget()
+            tree_container.setStyleSheet("background: transparent;")
+            tc_layout = QVBoxLayout(tree_container)
+            tc_layout.setContentsMargins(8, 8, 4, 8)
+            tc_layout.setSpacing(0)
+
+            tree_header = QLabel("ФАЙЛОВАЯ СИСТЕМА")
+            tree_header.setStyleSheet(
+                "color: #1e4060; font-size: 9px; font-weight: bold; "
+                "letter-spacing: 3px; padding: 0px 4px 6px 2px;")
+            tc_layout.addWidget(tree_header)
+
             self.file_tree = QTreeWidget()
             self.file_tree.setHeaderLabels(["Имя", "Тип", "Размер", "Права"])
-            self.file_tree.setColumnWidth(0, 320)
-            self.file_tree.setColumnWidth(1,  60)
-            self.file_tree.setColumnWidth(2,  90)
-            self.file_tree.setColumnWidth(3, 110)
+            self.file_tree.setColumnWidth(0, 300)
+            self.file_tree.setColumnWidth(1,  62)
+            self.file_tree.setColumnWidth(2,  88)
+            self.file_tree.setColumnWidth(3, 108)
             self.file_tree.setAlternatingRowColors(True)
             self.file_tree.setSortingEnabled(True)
+            self.file_tree.setRootIsDecorated(False)
+            self.file_tree.setUniformRowHeights(True)
             self.file_tree.itemDoubleClicked.connect(self._on_tree_double_click)
             self.file_tree.itemClicked.connect(self._on_tree_click)
-            main_splitter.addWidget(self.file_tree)
+            tc_layout.addWidget(self.file_tree)
 
-            # Правая часть — вкладки: просмотр файла / лог
+            main_splitter.addWidget(tree_container)
+
+            # Правая панель — вкладки
             right_tabs = QTabWidget()
-            right_tabs.setStyleSheet("""
-                QTabWidget::pane { border: none; background: #0a0d12; }
-                QTabBar::tab { background: #0d1117; color: #3a5070; padding: 6px 16px;
-                               border: 1px solid #1e2530; border-bottom: none;
-                               font-size: 11px; letter-spacing: 1px; }
-                QTabBar::tab:selected { background: #0a0d12; color: #4a90c4;
-                                        border-bottom: 1px solid #0a0d12; }
-                QTabBar::tab:hover { color: #7ab0e0; }
-            """)
 
+            # Вьюер файла
             self.file_viewer = QTextEdit()
             self.file_viewer.setObjectName("file_viewer")
             self.file_viewer.setReadOnly(True)
             self.file_viewer.setPlaceholderText(
                 "Кликните по файлу для просмотра содержимого...")
-            right_tabs.addTab(self.file_viewer, "ФАЙЛ")
+            right_tabs.addTab(self.file_viewer, "  ФАЙЛ  ")
 
+            # Лог
             self.log_box = QTextEdit()
             self.log_box.setReadOnly(True)
-            self.log_box.setFont(QFont("Consolas", 10))
+            self.log_box.setFont(QFont("Cascadia Code", 10))
             self.log_box.setStyleSheet(
-                "background-color: #070a0f; color: #6a9060; "
-                "border: none; padding: 6px;")
-            right_tabs.addTab(self.log_box, "ЛОГ")
+                "background-color: #060810; color: #5a9060; "
+                "border: none; padding: 8px; "
+                "font-family: 'Cascadia Code', 'Consolas', monospace;")
+            right_tabs.addTab(self.log_box, "  ЛОГ  ")
 
             self.right_tabs = right_tabs
             main_splitter.addWidget(right_tabs)
-            main_splitter.setSizes([560, 420])
+            main_splitter.setSizes([580, 440])
 
-            # Нижний сплиттер — файловое дерево + файловый просмотр | лог
-            content_splitter = QSplitter(Qt.Vertical)
-            content_splitter.addWidget(main_splitter)
-            content_splitter.setSizes([600])
-
-            rv.addWidget(content_splitter, 1)
+            rv.addWidget(main_splitter, 1)
 
             root.addWidget(right_widget, 1)
 
-            self.setStatusBar(QStatusBar())
+            # Статус-бар
+            sb = QStatusBar()
+            self.setStatusBar(sb)
+            self._status_perm = QLabel("Готов")
+            self._status_perm.setStyleSheet("color: #2a4a6a; padding-right:8px;")
+            sb.addPermanentWidget(self._status_perm)
+
             self.setStyleSheet(DARK_STYLE)
 
-        # ---- Вспомогательные ----
+        # ── Вспомогательные ──────────────────────────────────
 
         def _sep(self, layout):
             line = QFrame()
@@ -1109,16 +1195,19 @@ def _build_gui(bc: BenchConnector):
             if not name or name not in self.bc.stands:
                 self.board_icon_lbl.clear()
                 self.board_type_lbl.clear()
+                self.ip_label.clear()
                 return
             info      = self.bc.stands[name]
             icon_path = _board_icon_path(info.stand_type)
             if icon_path:
                 self.board_icon_lbl.setPixmap(
                     QPixmap(icon_path).scaled(
-                        180, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                        190, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
                 self.board_icon_lbl.clear()
-            self.board_type_lbl.setText(info.stand_type.upper() or "UNKNOWN")
+            self.board_type_lbl.setText(
+                f"[ {info.stand_type.upper()} ]" if info.stand_type else "[ UNKNOWN ]")
+            self.ip_label.setText(f"{info.ip}:{info.port}")
 
         def _update_folder_combo(self):
             name = self.stand_combo.currentText()
@@ -1132,44 +1221,52 @@ def _build_gui(bc: BenchConnector):
             self._update_board_icon()
             self._update_folder_combo()
 
-        # ---- Таймер статуса ----
+        # ── Таймер статуса ────────────────────────────────────
 
         def _start_status_timer(self):
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._refresh_status)
-            self._timer.start(3000)
+            self._timer.start(2500)
 
         def _refresh_status(self):
             name = self.stand_combo.currentText()
             if not name or name not in self.bc.stands:
                 return
             info = self.bc.stands[name]
-            if info.connected:
-                self.status_dot.setText("●  connected")
-                self.status_dot.setStyleSheet("color: #40c060; font-size: 12px; font-weight: bold;")
-                qconn_txt = "[qconn]" if info.qconn_active else ""
-                self.qconn_lbl.setText(qconn_txt)
-                self.qconn_lbl.setStyleSheet(
-                    "color: #409040; font-size: 10px;" if info.qconn_active
-                    else "color: #3a5a3a; font-size: 10px;")
-            elif info.status == "online":
-                self.status_dot.setText("●  online")
-                self.status_dot.setStyleSheet("color: #3090a0; font-size: 12px; font-weight: bold;")
-                self.qconn_lbl.setText("")
-            else:
-                self.status_dot.setText("●  offline")
-                self.status_dot.setStyleSheet("color: #334455; font-size: 12px; font-weight: bold;")
-                self.qconn_lbl.setText("")
+            self._pulse_state = not self._pulse_state
+            dot = "●" if self._pulse_state else "◉"
 
-        # ---- Подключение ----
+            if info.connected:
+                self.status_dot.setText(f"{dot}   CONNECTED")
+                self.status_dot.setStyleSheet(
+                    "color: #38c060; font-size:12px; font-weight:bold; letter-spacing:1px;")
+                self.qconn_lbl.setText("[  QCONN  ]" if info.qconn_active else "")
+                self.qconn_lbl.setStyleSheet(
+                    "color: #409040; font-size:10px; letter-spacing:2px;"
+                    if info.qconn_active else "")
+                self._status_perm.setText(f"SSH: {info.ip}:{info.port}")
+            elif info.status == "online":
+                self.status_dot.setText(f"{dot}   ONLINE")
+                self.status_dot.setStyleSheet(
+                    "color: #2a9aaa; font-size:12px; font-weight:bold; letter-spacing:1px;")
+                self.qconn_lbl.setText("")
+                self._status_perm.setText(f"Доступен: {info.ip}")
+            else:
+                self.status_dot.setText("●   OFFLINE")
+                self.status_dot.setStyleSheet(
+                    "color: #253545; font-size:12px; font-weight:bold; letter-spacing:1px;")
+                self.qconn_lbl.setText("")
+                self._status_perm.setText("Нет соединения")
+
+        # ── Подключение ───────────────────────────────────────
 
         def _on_connect(self):
             name = self.stand_combo.currentText()
             if not name:
                 return
             self.btn_connect.setEnabled(False)
-            self.btn_connect.setText("⏳  Подключение...")
-            self._log(f"▶ Подключаемся к {name}...")
+            self.btn_connect.setText("⏳   Соединение...")
+            self._log(f"▶ Инициализация подключения → {name}")
 
             worker = ConnectWorker(self.bc, name)
             worker.log.connect(self._log)
@@ -1178,13 +1275,13 @@ def _build_gui(bc: BenchConnector):
             worker.start()
 
         def _on_connect_done(self, ok, msg, stand_name):
-            self.btn_connect.setText("⏎  Подключиться")
+            self.btn_connect.setText("⏎   Подключиться")
             if ok:
                 self.btn_connect.setEnabled(False)
                 self.btn_disconnect.setEnabled(True)
                 self.btn_up.setEnabled(True)
                 self._log(f"✓ {msg}")
-                self.statusBar().showMessage(msg)
+                self.statusBar().showMessage(msg, 5000)
                 self.current_stand = stand_name
                 info = self.bc.stands[stand_name]
                 self.current_path  = info.browse_folders[0]
@@ -1204,10 +1301,11 @@ def _build_gui(bc: BenchConnector):
             self.file_tree.clear()
             self.file_viewer.clear()
             self.path_label.setText("/")
-            self.current_path = None
+            self.current_path  = None
+            self.current_stand = None
             self._log(f"✕ Отключено от {name}")
 
-        # ---- Навигация по папкам ----
+        # ── Навигация ─────────────────────────────────────────
 
         def _on_quick_folder(self, index):
             path = self.folder_combo.itemText(index)
@@ -1222,11 +1320,15 @@ def _build_gui(bc: BenchConnector):
             self.current_path = parent
             self._load_directory(self.current_stand, parent)
 
+        def _on_refresh(self):
+            if self.current_stand and self.current_path:
+                self._load_directory(self.current_stand, self.current_path)
+
         def _load_directory(self, stand_name, path):
             self.file_tree.clear()
             self.file_viewer.clear()
             self.path_label.setText(path)
-            self._log(f"  cd {path}")
+            self._log(f"  › cd {path}")
             self.statusBar().showMessage(f"Загрузка {path}...")
 
             worker = ListDirWorker(self.bc, stand_name, path)
@@ -1238,11 +1340,11 @@ def _build_gui(bc: BenchConnector):
             self.file_tree.clear()
             if not ok:
                 self._log(f"  ✗ {err}")
-                self.statusBar().showMessage(f"Ошибка: {err}")
+                self.statusBar().showMessage(f"Ошибка: {err}", 4000)
                 return
             if not entries:
                 self._log("  (пусто или нет прав)")
-                self.statusBar().showMessage(f"{path} — пусто")
+                self.statusBar().showMessage(f"{path} — пусто", 3000)
                 return
 
             dirs  = sorted([e for e in entries if     e["is_dir"]], key=lambda x: x["name"].lower())
@@ -1260,12 +1362,17 @@ def _build_gui(bc: BenchConnector):
                 ])
                 item.setData(0, Qt.UserRole, e)
                 if is_dir:
-                    item.setForeground(0, QColor("#4a90c4"))
+                    item.setForeground(0, QColor("#3a8ac4"))
+                    item.setForeground(1, QColor("#2a5a7a"))
+                else:
+                    item.setForeground(1, QColor("#2a4a5a"))
+                    item.setForeground(2, QColor("#3a6a4a"))
+                    item.setForeground(3, QColor("#2a4040"))
                 self.file_tree.addTopLevelItem(item)
 
-            self._log(f"  {len(dirs)} папок, {len(files)} файлов")
-            self.statusBar().showMessage(
-                f"{path}  •  {len(dirs)} папок, {len(files)} файлов")
+            msg = f"{path}  •  {len(dirs)} папок,  {len(files)} файлов"
+            self._log(f"  ✓ {len(dirs)} папок, {len(files)} файлов")
+            self.statusBar().showMessage(msg, 6000)
 
         def _on_tree_double_click(self, item, _):
             entry = item.data(0, Qt.UserRole)
@@ -1274,7 +1381,6 @@ def _build_gui(bc: BenchConnector):
                 self._load_directory(self.current_stand, entry["path"])
 
         def _on_tree_click(self, item, _):
-            """Одиночный клик по файлу — читаем содержимое."""
             entry = item.data(0, Qt.UserRole)
             if entry and not entry["is_dir"] and self.current_stand:
                 self._read_file(self.current_stand, entry["path"])
@@ -1291,25 +1397,25 @@ def _build_gui(bc: BenchConnector):
 
         def _on_file_read(self, ok, content, path):
             if ok:
-                header = f"══ {path} ══\n\n"
+                header = f"══════  {path}  ══════\n\n"
                 self.file_viewer.setText(header + content)
                 self._log(f"  ✓ файл прочитан: {path}")
             else:
                 self.file_viewer.setText(f"✗ Ошибка чтения:\n{content}")
                 self._log(f"  ✗ ошибка чтения {path}")
 
-        # ---- Диагностика ----
+        # ── Диагностика ───────────────────────────────────────
 
         def _on_diagnose(self):
             name = self.stand_combo.currentText()
             if not name:
                 return
-            self._log(f"--- Диагностика {name} ---")
+            self._log(f"─── Диагностика {name} ───")
             result = self.bc.diagnose_connection(name)
             self._log(result)
             self.right_tabs.setCurrentIndex(1)
 
-        # ---- Утилиты ----
+        # ── Утилиты ───────────────────────────────────────────
 
         @staticmethod
         def _fmt_size(n: int) -> str:
@@ -1323,15 +1429,33 @@ def _build_gui(bc: BenchConnector):
 
         def _log(self, text: str):
             ts = datetime.now().strftime("%H:%M:%S")
-            self.log_box.append(f'<span style="color:#2a4a3a">[{ts}]</span> {text}')
+            self.log_box.append(
+                f'<span style="color:#1e3c28">[{ts}]</span>'
+                f'<span style="color:#4a7a5a"> {text}</span>')
 
         def closeEvent(self, event):
             self.bc.stop_monitoring()
             event.accept()
 
-    # ----------------------------------------------------------
+    # ──────────────────────────────────────────────────────────
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    # Тёмная палитра для системных элементов
+    palette = QPalette()
+    palette.setColor(QPalette.Window,          QColor("#0e1118"))
+    palette.setColor(QPalette.WindowText,      QColor("#b8c8dc"))
+    palette.setColor(QPalette.Base,            QColor("#0b0f18"))
+    palette.setColor(QPalette.AlternateBase,   QColor("#0d1220"))
+    palette.setColor(QPalette.ToolTipBase,     QColor("#0d1220"))
+    palette.setColor(QPalette.ToolTipText,     QColor("#90b8d8"))
+    palette.setColor(QPalette.Text,            QColor("#b8c8dc"))
+    palette.setColor(QPalette.Button,          QColor("#1c2840"))
+    palette.setColor(QPalette.ButtonText,      QColor("#90aac8"))
+    palette.setColor(QPalette.Highlight,       QColor("#1a3258"))
+    palette.setColor(QPalette.HighlightedText, QColor("#d0e8ff"))
+    palette.setColor(QPalette.Link,            QColor("#4a90c4"))
+    app.setPalette(palette)
 
     app_icon = _icon_path(DEFAULT_ICON)
     if app_icon:
