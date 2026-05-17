@@ -30,10 +30,10 @@ jobs:
       - name: Build EXE
         shell: cmd
         env:
-          SERVER_USERNAME:    ${{ secrets.SERVER_USERNAME }}
-          SERVER_PASSWORD:    ${{ secrets.SERVER_PASSWORD }}
-          ROOT_USERNAME:      ${{ secrets.ROOT_USERNAME }}
-          ORANGEPI_PASSWORD:  ${{ secrets.ORANGEPI_PASSWORD }}
+          SERVER_USERNAME: ${{ secrets.SERVER_USERNAME }}
+          SERVER_PASSWORD: ${{ secrets.SERVER_PASSWORD }}
+          ROOT_USERNAME: ${{ secrets.ROOT_USERNAME }}
+          ORANGEPI_PASSWORD: ${{ secrets.ORANGEPI_PASSWORD }}
         run: |
           pyinstaller ^
             --onefile ^
@@ -61,4 +61,3 @@ jobs:
           name: BenchManager-Windows
           path: dist/BenchManager.exe
           retention-days: 30
- это верный?
