@@ -1,42 +1,32 @@
 name: Build Bench Manager EXE
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         shell: cmd
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller PyQt5 paramiko pyyaml pillow
-
       - name: Convert logo to ICO
-        shell: cmd
+        shell: python
         run: |
-          python -c "
           from PIL import Image
           img = Image.open('gui/images/logo.png').convert('RGBA')
           img.save('gui/images/logo.ico', format='ICO', sizes=[(256,256),(128,128),(64,64),(32,32),(16,16)])
           print('ICO created OK')
-          "
-
       - name: Build EXE
         shell: cmd
         env:
@@ -55,7 +45,6 @@ jobs:
             --collect-submodules paramiko ^
             --collect-submodules yaml ^
             main.py
-
       - name: Verify build
         shell: cmd
         run: |
@@ -66,10 +55,10 @@ jobs:
             echo BUILD FAILED - EXE not found
             exit /b 1
           )
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: BenchManager-Windows
           path: dist/BenchManager.exe
           retention-days: 30
+ это верный?
