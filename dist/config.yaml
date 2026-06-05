@@ -1,0 +1,44 @@
+stands:
+  - name: GOZ
+    ip: 192.168.243.248
+    username: pkrv
+    password: zxcv
+    port: 22
+    board:
+      type: goz
+    folders:
+      cvs: /home/pkrv/CVS
+
+  - name: C1M
+    ip: 192.168.243.254
+    username: pkrv
+    password: zxcv
+    port: 22
+    board:
+      type: c1m
+    folders:
+      cvs: /home/pkrv/CVS
+
+  - name: ARKTIKA
+    ip: 192.168.243.249
+    username: pkrv
+    password: zxcv
+    port: 22
+    board:
+      type: arktika
+    folders:
+      cvs: /home/pkrv/CVS
+
+  - name: ORANGEPI
+    ip: 192.168.243.46
+    username: root
+    password: orangepi
+    port: 22
+    board:
+      type: orangepi
+    folders:
+      cvs: /
+
+monitoring:
+  check_interval: 5
+  ssh_timeout: 10
